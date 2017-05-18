@@ -1,0 +1,24 @@
+# Systemd configuration file
+#
+# The Jitterentropy RNGd does not depend on any other system
+# services. Futhermore, we want to start it as early as possible
+# in the boot cycle so that other services requiring
+# random numbers (like SSHD, TLS-based services) benefit
+# from a properly seeded /dev/?random
+
+[Unit]
+Description=Jitterentropy Gatherer Daemon
+DefaultDependencies=no
+After=local-fs.target
+Before=sysinit.target
+
+[Service]
+ExecStart=/usr/local/sbin/jitterentropy-rngd
+#PrivateTmp=yes
+#PrivateDevices=yes
+#ReadOnlyDirectories=/
+#ReadWriteDirectories=/dev
+
+[Install]
+WantedBy=basic.target
+Alias=jitterentropy-rngd.service
