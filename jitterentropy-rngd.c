@@ -61,7 +61,7 @@
 #define MINVERSION 0 /* API compatible, ABI may change, functional
 		      * enhancements only, consumer can be left unchanged if
 		      * enhancements are not considered */
-#define PATCHLEVEL 6 /* API / ABI compatible, no functional changes, no
+#define PATCHLEVEL 7 /* API / ABI compatible, no functional changes, no
 		      * enhancements, bug fixes only */
 
 static int Verbosity = 0;
