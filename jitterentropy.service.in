@@ -13,7 +13,7 @@ After=local-fs.target
 Before=sysinit.target
 
 [Service]
-ExecStart=/usr/local/sbin/jitterentropy-rngd
+ExecStart=@PATH@/jitterentropy-rngd
 #PrivateTmp=yes
 #PrivateDevices=yes
 #ReadOnlyDirectories=/
