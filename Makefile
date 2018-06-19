@@ -39,9 +39,11 @@ install: strip
 	$(INSTALL) -D -m 0755 -s $(NAME) $(DESTDIR)$(PREFIX)/sbin/$(NAME)
 	$(INSTALL) -D -m 0644 $(NAME).1 $(DESTDIR)$(PREFIX)/share/man/man1/$(NAME).1
 	gzip -9 $(DESTDIR)$(PREFIX)/share/man/man1/$(NAME).1
+	sed "s|@PATH@|$(PREFIX)/sbin|" jitterentropy.service.in > jitterentropy.service
 
 clean:
 	@- $(RM) $(NAME)
 	@- $(RM) $(OBJS)
+	@- $(RM) jitterentropy.service
 
 distclean: clean
