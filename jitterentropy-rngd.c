@@ -146,7 +146,7 @@ static void parse_opts(int argc, char *argv[])
 			{"version", 0, 0, 0},
 			{0, 0, 0, 0}
 		};
-		c = getopt_long(argc, argv, "vph:", opts, &opt_index);
+		c = getopt_long(argc, argv, "vp:h", opts, &opt_index);
 		if (-1 == c)
 			break;
 		switch (c) {
