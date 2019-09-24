@@ -10,6 +10,9 @@ The seeding of /dev/random also ensures that /dev/urandom benefits from
 entropy. Especially during boot time, when the entropy of Linux is low,
 the Jitter RNGd provides a source of sufficient entropy.
 
+By using the SP800-90B-compliant Jitter RNG core library, the RNGd itself
+is now fully SP800-90B compliant.
+
 Build Instructions
 ==================
 
