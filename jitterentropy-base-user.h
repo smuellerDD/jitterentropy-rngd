@@ -1,7 +1,7 @@
 /*
  * Non-physical true random number generator based on timing jitter.
  *
- * Copyright Stephan Mueller <smueller@chronox.de>, 2013
+ * Copyright Stephan Mueller <smueller@chronox.de>, 2013 - 2019
  *
  * License
  * =======
@@ -59,7 +59,6 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include <asm/types.h>
 #include <sys/types.h>
 
 #include <sys/stat.h>
@@ -172,8 +171,8 @@ static inline int jent_fips_enabled(void)
 #define FIPS_MODE_SWITCH_FILE "/proc/sys/crypto/fips_enabled"
 	char buf[2] = "0";
 	int fd = 0;
-        if ((fd = open(FIPS_MODE_SWITCH_FILE, O_RDONLY)) >= 0)
-	{
+
+	if ((fd = open(FIPS_MODE_SWITCH_FILE, O_RDONLY)) >= 0) {
 		while (read(fd, buf, sizeof(buf)) < 0 && errno == EINTR);
 		close(fd);
 	}
