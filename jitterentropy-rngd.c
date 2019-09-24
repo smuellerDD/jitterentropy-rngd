@@ -266,8 +266,15 @@ static size_t write_random(struct kernel_rng *rng, char *buf, size_t len,
 
 static size_t gather_entropy(struct kernel_rng *rng)
 {
+	sigset_t blocking_set, previous_set;
 	char buf[(ENTROPYBYTES * OVERSAMPLINGFACTOR)];
 	size_t ret = 0;
+
+	sigemptyset(&previous_set);
+	sigemptyset(&blocking_set);
+	sigaddset(&blocking_set, SIGALRM);
+
+	sigprocmask(SIG_BLOCK, &blocking_set, &previous_set);
 
 	if (0 > jent_read_entropy(rng->ec, buf, sizeof(buf))) {
 		dolog(LOG_WARN, "Cannot read entropy");
@@ -280,6 +287,8 @@ static size_t gather_entropy(struct kernel_rng *rng)
 	else
 		ret = sizeof(buf);
 	memset_secure(buf, 0, sizeof(buf));
+
+	sigprocmask(SIG_SETMASK, &previous_set, NULL);
 
 	return ret;
 }
