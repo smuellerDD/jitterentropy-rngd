@@ -368,6 +368,16 @@ static void sig_term(int sig)
 {
 	(void)sig;
 	dolog(LOG_DEBUG, "Shutting down cleanly\n");
+
+	/* Prevent the kernel from interfering with the shutdown */
+	signal(SIGALRM, SIG_IGN);
+
+	/* If we got another termination signal, just get killed */
+	signal(SIGHUP, SIG_DFL);
+	signal(SIGINT, SIG_DFL);
+	signal(SIGQUIT, SIG_DFL);
+	signal(SIGTERM, SIG_DFL);
+
 	dealloc();
 	exit(0);
 }
