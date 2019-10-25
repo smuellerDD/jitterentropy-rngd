@@ -13,11 +13,36 @@ After=local-fs.target
 Before=sysinit.target
 
 [Service]
+CapabilityBoundingSet=
+DeviceAllow=/dev/null rw
+DeviceAllow=/dev/random rw
+DevicePolicy=strict
 ExecStart=@PATH@/jitterentropy-rngd
-#PrivateTmp=yes
-#PrivateDevices=yes
-#ReadOnlyDirectories=/
-#ReadWriteDirectories=/dev
+IPAddressDeny=any
+LimitMEMLOCK=0
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+MountFlags=private
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateMounts=yes
+PrivateNetwork=yes
+PrivateTmp=yes
+PrivateUsers=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectSystem=strict
+ReadOnlyPaths=-/
+RemoveIPC=yes
+RestrictAddressFamilies=
+RestrictNamespaces=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@chown @clock @cpu-emulation @debug @ipc @module @mount @obsolete @privileged @raw-io @reboot @resources @swap memfd_create mincore mlock mlockall personality
+UMask=0077
 
 [Install]
 WantedBy=basic.target
