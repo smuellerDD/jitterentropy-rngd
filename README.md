@@ -35,6 +35,23 @@ daemons during the user space start process. This shall guarantee that
 any cryptographic daemons, like sshd or a web server, benefits from a seeded
 /dev/random and /dev/urandom device at the time they start up.
 
+Docker
+======
+
+Run using docker-compose:
+
+```
+docker-compose up -d
+```
+
+Build and run manually:
+
+```
+docker build -t jitterentropy-rngd .
+docker run --cap-add=SYS_ADMIN --cap-drop=ALL --name=rngd --network=none \
+    --restart=always -d jitterentropy-rngd
+```
+
 Version Numbers
 ===============
 The version numbers for this library have the following schema:
