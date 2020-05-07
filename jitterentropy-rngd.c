@@ -58,7 +58,7 @@
 		      * require consumer to be updated (as long as this number
 		      * is zero, the API is not considered stable and can
 		      * change without a bump of the major version) */
-#define MINVERSION 1 /* API compatible, ABI may change, functional
+#define MINVERSION 2 /* API compatible, ABI may change, functional
 		      * enhancements only, consumer can be left unchanged if
 		      * enhancements are not considered */
 #define PATCHLEVEL 0 /* API / ABI compatible, no functional changes, no
@@ -99,8 +99,15 @@ static int Entropy_avail_fd = 0;
 #define ENTROPYBYTES 32
 #define OVERSAMPLINGFACTOR 2
 #define ENTROPYTHRESH 1024
+/*
+ * After FORCE_RESEED_WAKEUPS, the installed alarm handler will unconditionally
+ * trigger a reseed irrespective of the seed level. This ensures that new
+ * seed is added after FORCE_RESEED_WAKEUPS * (alarm period defined in
+ * install_alarm) == 120 * 5 == 600s.
+ */
+#define FORCE_RESEED_WAKEUPS	120
 #define ENTROPYAVAIL "/proc/sys/kernel/random/entropy_avail"
-#define LRNG_FILE "/proc/sys/kernel/random/lrng_type"
+#define LRNG_FILE "/proc/lrng_type"
 
 static void install_alarm(void);
 static void dealloc(void);
@@ -248,7 +255,7 @@ static size_t write_random(struct kernel_rng *rng, char *buf, size_t len,
 	memcpy(rng->rpi->buf, buf, len);
 	memset(buf, 0, len);
 
-	ret =  ioctl(rng->fd, RNDADDENTROPY, rng->rpi);
+	ret = ioctl(rng->fd, RNDADDENTROPY, rng->rpi);
 	if (0 > ret)
 		dolog(LOG_WARN, "Error injecting entropy: %s", strerror(errno));
 	else {
@@ -332,10 +339,20 @@ static void sig_entropy_avail(int sig)
 {
 	int entropy = 0;
 	size_t written = 0;
+	static unsigned int force_reseed = FORCE_RESEED_WAKEUPS;
 
 	(void)sig;
 
 	dolog(LOG_VERBOSE, "Wakeup call for alarm on %s", ENTROPYAVAIL);
+
+	if (--force_reseed == 0) {
+		force_reseed = FORCE_RESEED_WAKEUPS;
+		dolog(LOG_DEBUG, "Force reseed", entropy);
+		written = gather_entropy(&Random);
+		dolog(LOG_VERBOSE, "%lu bytes written to /dev/random", written);
+		goto out;
+	}
+
 	entropy = read_entropy_avail(Entropy_avail_fd);
 
 	if (0 == entropy)

@@ -1,3 +1,9 @@
+1.2.0:
+ * Due to the removal of the blocking pool in kernel 5.6, it is becoming
+   very unlikely that the user space rngd is ever triggered by the kernel.
+   Thus, the jitterentropy-rngd now injects entropy every 10 minutes
+   unconditionally.
+
 1.1.0:
  * avert crash during shutdown when the kernel sends a SIGALRM while the
    Jitter RNG is deallocated

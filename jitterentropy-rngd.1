@@ -63,6 +63,11 @@ the kernel may still complain about insufficient entropy
 available for
 .IR /dev/urandom .
 .LP
+In addition, the
+.IR jitterentropy-rngd
+injects 256 bits of entropy every 10 minutes unconditionally
+irrespective whether the kernel has sufficient entropy or not.
+.LP
 The following options are supported when invoking
 .IR jitterentropy-rngd :
 .TP
