@@ -3,6 +3,10 @@
    very unlikely that the user space rngd is ever triggered by the kernel.
    Thus, the jitterentropy-rngd now injects entropy every 10 minutes
    unconditionally.
+ * Use the RNDRESEEDCRNG ioctl after injecting entropy to guarantee that
+   the new entropy is immediately forwarded to the ChaCha20 DRNG. Otherwise
+   the ChaCha20 DRNG will not benefit from the new entropy up to 5 minutes
+   after the injection of the entropy.
 
 1.1.0:
  * avert crash during shutdown when the kernel sends a SIGALRM while the

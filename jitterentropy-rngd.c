@@ -268,6 +268,12 @@ static size_t write_random(struct kernel_rng *rng, char *buf, size_t len,
 	rng->rpi->buf_size = 0;
 	memset(rng->rpi->buf, 0, len);
 
+	if (ioctl(rng->fd, RNDRESEEDCRNG) < 0 && errno != EINVAL) {
+		dolog(LOG_WARN,
+		      "Error triggering a reseed of the kernel DRNG: %s\n",
+		      strerror(errno));
+	}
+
 	return written;
 }
 
