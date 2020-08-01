@@ -13,7 +13,7 @@ After=local-fs.target
 Before=sysinit.target
 
 [Service]
-CapabilityBoundingSet=
+CapabilityBoundingSet=CAP_SYS_ADMIN
 DeviceAllow=/dev/null rw
 DeviceAllow=/dev/random rw
 DevicePolicy=strict
@@ -28,7 +28,7 @@ PrivateDevices=yes
 PrivateMounts=yes
 PrivateNetwork=yes
 PrivateTmp=yes
-PrivateUsers=yes
+PrivateUsers=no
 ProtectControlGroups=yes
 ProtectHome=yes
 ProtectKernelModules=yes
