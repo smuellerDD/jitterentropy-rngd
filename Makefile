@@ -2,8 +2,8 @@
 
 CC ?= $(CROSS_COMPILE)gcc
 STRIP ?= $(CROSS_COMPILE)strip
-CFLAGS ?=-Wextra -Wall -pedantic -fPIE -pie -fstack-protector-strong -fwrapv --param ssp-buffer-size=4
-LDFLAGS ?=-Wl,-z,relro,-z,now
+CFLAGS ?=-Wextra -Wall -pedantic -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=2 -fstack-protector-strong -fwrapv --param ssp-buffer-size=4 -fvisibility=hidden -fPIE -Wcast-align -Wmissing-field-initializers -Wshadow -Wswitch-enum -O2
+LDFLAGS ?=-Wl,-z,relro,-z,now -pie
 
 # Change as necessary
 DESTDIR :=
@@ -19,7 +19,7 @@ OBJS := $(C_OBJS)
 
 INCLUDE_DIRS :=
 LIBRARY_DIRS :=
-LIBRARIES := rt
+LIBRARIES := rt pthread
 
 CFLAGS += $(foreach includedir,$(INCLUDE_DIRS),-I$(includedir))
 LDFLAGS += $(foreach librarydir,$(LIBRARY_DIRS),-L$(librarydir))

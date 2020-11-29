@@ -1,7 +1,7 @@
 /*
  * Non-physical true random number generator based on timing jitter.
  *
- * Copyright Stephan Mueller <smueller@chronox.de>, 2013 - 2019
+ * Copyright Stephan Mueller <smueller@chronox.de>, 2013 - 2020
  *
  * License
  * =======
@@ -66,6 +66,11 @@
 #include <unistd.h>
 #include <errno.h>
 
+/* Timer-less entropy source */
+#ifdef JENT_CONF_ENABLE_INTERNAL_TIMER
+#include <pthread.h>
+#endif /* JENT_CONF_ENABLE_INTERNAL_TIMER */
+
 #ifdef LIBGCRYPT
 #include <config.h>
 #include "g10lib.h"
@@ -86,13 +91,28 @@
 #include <unistd.h>
 #endif
 
+#ifdef __x86_64__
+
+# define DECLARE_ARGS(val, low, high)    unsigned long low, high
+# define EAX_EDX_VAL(val, low, high)     ((low) | (high) << 32)
+# define EAX_EDX_RET(val, low, high)     "=a" (low), "=d" (high)
+
+static inline void jent_get_nstime(uint64_t *out)
+{
+	DECLARE_ARGS(val, low, high);
+	asm volatile("rdtsc" : EAX_EDX_RET(val, low, high));
+	*out = EAX_EDX_VAL(val, low, high);
+}
+
+#else /* __x86_64__ */
+
 static inline void jent_get_nstime(uint64_t *out)
 {
 	/* OSX does not have clock_gettime -- taken from
 	 * http://developer.apple.com/library/mac/qa/qa1398/_index.html */
-#ifdef __MACH__
+# ifdef __MACH__
 	*out = mach_absolute_time();
-#elif _AIX
+# elif _AIX
 	/* clock_gettime() on AIX returns a timer value that increments in
 	 * steps of 1000
 	 */
@@ -103,7 +123,7 @@ static inline void jent_get_nstime(uint64_t *out)
 	tmp = tmp << 32;
 	tmp = tmp | aixtime.tb_low;
 	*out = tmp;
-#else /* __MACH__ */
+# else /* __MACH__ */
 	/* we could use CLOCK_MONOTONIC(_RAW), but with CLOCK_REALTIME
 	 * we get some nice extra entropy once in a while from the NTP actions
 	 * that we want to use as well... though, we do not rely on that
@@ -112,13 +132,15 @@ static inline void jent_get_nstime(uint64_t *out)
 	struct timespec time;
 	if (clock_gettime(CLOCK_REALTIME, &time) == 0)
 	{
-		tmp = time.tv_sec;
+		tmp = (uint32_t)time.tv_sec;
 		tmp = tmp << 32;
-		tmp = tmp | time.tv_nsec;
+		tmp = tmp | (uint32_t)time.tv_nsec;
 	}
 	*out = tmp;
-#endif /* __MACH__ */
+# endif /* __MACH__ */
 }
+
+#endif /* __x86_64__ */
 
 static inline void *jent_zalloc(size_t len)
 {
@@ -183,15 +205,17 @@ static inline int jent_fips_enabled(void)
 #endif
 }
 
-/* --- helpers needed in user space -- */
-
-/* note: these helper functions are shamelessly stolen from the kernel :-) */
-
-static inline uint64_t rol64(uint64_t word, unsigned int shift)
+static inline void jent_memset_secure(void *s, size_t n)
 {
-	return (word << shift) | (word >> (64 - shift));
+	memset(s, 0, n);
+	__asm__ __volatile__("" : : "r" (s) : "memory");
 }
 
+/* --- helpers needed in user space -- */
+
+static inline uint64_t rol64(uint64_t x, int n)
+{
+	return ( (x << (n&(64-1))) | (x >> ((64-n)&(64-1))) );
+}
 
 #endif /* _JITTERENTROPY_BASE_USER_H */
-

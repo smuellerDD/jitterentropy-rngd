@@ -7,6 +7,7 @@
    the new entropy is immediately forwarded to the ChaCha20 DRNG. Otherwise
    the ChaCha20 DRNG will not benefit from the new entropy up to 5 minutes
    after the injection of the entropy.
+ * Use Jitter RNG library 3.0.0
 
 1.1.0:
  * avert crash during shutdown when the kernel sends a SIGALRM while the
