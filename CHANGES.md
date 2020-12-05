@@ -1,3 +1,6 @@
+1.2.1:
+ * on older GCC versions, use -fstack-protector
+
 1.2.0:
  * Due to the removal of the blocking pool in kernel 5.6, it is becoming
    very unlikely that the user space rngd is ever triggered by the kernel.
