@@ -1,5 +1,8 @@
 1.2.1:
- * on older GCC versions, use -fstack-protector
+  * on older GCC versions use -fstack-protector as suggested by Warszawski,
+   Diego
+ * prevent creating the internal timer thread if a high-res hardware timer is
+   found as reported by Lonnie Abelbeck
 
 1.2.0:
  * Due to the removal of the blocking pool in kernel 5.6, it is becoming
