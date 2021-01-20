@@ -4,6 +4,7 @@
  * prevent creating the internal timer thread if a high-res hardware timer is
    found as reported by Lonnie Abelbeck
  * disable RNDRESEEDCRNG on kernels < 4.17 as suggested by Warszawski, Diego
+ * Use Jitter RNG library 3.0.1
 
 1.2.0:
  * Due to the removal of the blocking pool in kernel 5.6, it is becoming
