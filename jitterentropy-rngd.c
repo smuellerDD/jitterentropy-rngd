@@ -42,9 +42,11 @@
 #include <sys/types.h>
 #include <asm/types.h>
 #include <errno.h>
+#include <limits.h>
 #include <string.h>
 #include <stdlib.h>
 #include <sys/ioctl.h>
+#include <sys/utsname.h>
 #define _GNU_SOURCE
 #include <getopt.h>
 #include <sys/stat.h>
@@ -62,10 +64,11 @@
 #define MINVERSION 2 /* API compatible, ABI may change, functional
 		      * enhancements only, consumer can be left unchanged if
 		      * enhancements are not considered */
-#define PATCHLEVEL 1 /* API / ABI compatible, no functional changes, no
+#define PATCHLEVEL 2 /* API / ABI compatible, no functional changes, no
 		      * enhancements, bug fixes only */
 
 static int Verbosity = 0;
+static int force_sp80090b = 0;
 
 struct kernel_rng {
 	int fd;
@@ -114,10 +117,87 @@ static void install_alarm(void);
 static void dealloc(void);
 static void dealloc_rng(struct kernel_rng *rng);
 
+static unsigned long kern_maj = ULONG_MAX, kern_minor, kern_patchlevel;
+
 static void jentrng_versionstring(char *buf, size_t buflen)
 {
 	snprintf(buf, buflen, "jitterentropy-rngd %d.%d.%d",
 		 MAJVERSION, MINVERSION, PATCHLEVEL);
+}
+
+/* Is the LRNG present instead of the legacy /dev/random? */
+static int lrng_present(void)
+{
+	struct stat buf;
+	static int lrng_present = -1;
+
+	if (lrng_present < 0) {
+		int ret = stat(LRNG_FILE, &buf);
+
+		if (ret == -1 && errno == ENOENT)
+			lrng_present = 0;
+		else
+			lrng_present = 1;
+	}
+
+	return lrng_present;
+}
+
+static int get_kernver(void)
+{
+	struct utsname kernel;
+	char *saveptr = NULL;
+	char *res = NULL;
+
+	if (kern_maj != ULONG_MAX)
+		return 0;
+
+	if (uname(&kernel))
+		return -errno;
+
+	/* 5.11.2 */
+	res = strtok_r(kernel.release, ".", &saveptr);
+	if (!res) {
+		printf("Could not parse kernel version");
+		return -EFAULT;
+	}
+	kern_maj = strtoul(res, NULL, 10);
+
+	res = strtok_r(NULL, ".", &saveptr);
+	if (!res) {
+		printf("Could not parse kernel version");
+		return -EFAULT;
+	}
+	kern_minor = strtoul(res, NULL, 10);
+
+	res = strtok_r(NULL, ".", &saveptr);
+	if (!res) {
+		printf("Could not parse kernel version");
+		return -EFAULT;
+	}
+	kern_patchlevel = strtoul(res, NULL, 10);
+
+	return 0;
+}
+
+/* return true if kernel is greater or equal to given values, otherwise false */
+static int kernver_ge(unsigned int maj, unsigned int minor,
+		      unsigned int patchlevel)
+{
+	if (get_kernver())
+		return 0;
+
+	if (maj < kern_maj)
+		return 1;
+	if (maj == kern_maj) {
+		if (minor < kern_minor)
+			return 1;
+		if (minor == kern_minor) {
+			if (patchlevel <= kern_patchlevel)
+				return 1;
+		}
+	}
+	return 0;
 }
 
 static void usage(void)
@@ -137,6 +217,9 @@ static void usage(void)
 	fprintf(stderr, "\t-v --verbose\tVerbose logging, multiple options increase verbosity\n");
 	fprintf(stderr, "\t\t\tVerbose logging implies running in foreground\n");
 	fprintf(stderr, "\t-p --pid\tWrite daemon PID to file\n");
+	fprintf(stderr, "\t-s --sp800-90b\tForce SP800-90B compliance\n");
+	fprintf(stderr, "LRNG presence %sdetected\n",
+		lrng_present() ? "" : "not ");
 	exit(1);
 }
 
@@ -152,9 +235,10 @@ static void parse_opts(int argc, char *argv[])
 			{"pid", 1, 0, 0},
 			{"help", 0, 0, 0},
 			{"version", 0, 0, 0},
+			{"sp800-90b", 0, 0, 0},
 			{0, 0, 0, 0}
 		};
-		c = getopt_long(argc, argv, "vp:h", opts, &opt_index);
+		c = getopt_long(argc, argv, "svp:h", opts, &opt_index);
 		if (-1 == c)
 			break;
 		switch (c) {
@@ -175,6 +259,9 @@ static void parse_opts(int argc, char *argv[])
 				fprintf(stderr, "Version Jitterentropy Core %u\n", jent_version());
 				exit(0);
 				break;
+			case 4:
+				force_sp80090b = 1;
+				break;
 			default:
 				usage();
 			}
@@ -187,6 +274,9 @@ static void parse_opts(int argc, char *argv[])
 			break;
 		case 'h':
 			usage();
+			break;
+		case 's':
+			force_sp80090b = 1;
 			break;
 		default:
 			usage();
@@ -245,7 +335,7 @@ static inline void memset_secure(void *s, int c, size_t n)
  *******************************************************************/
 
 static size_t write_random(struct kernel_rng *rng, char *buf, size_t len,
-			   size_t entropy_bytes)
+			   size_t entropy_bytes, int force_reseed)
 {
 	size_t written = 0;
 	int ret;
@@ -270,7 +360,8 @@ static size_t write_random(struct kernel_rng *rng, char *buf, size_t len,
 	memset(rng->rpi->buf, 0, len);
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,17,0)
-	if (ioctl(rng->fd, RNDRESEEDCRNG) < 0 && errno != EINVAL) {
+	if (force_reseed && kernver_ge(4, 17, 0) &&
+	    ioctl(rng->fd, RNDRESEEDCRNG) < 0 && errno != EINVAL) {
 		dolog(LOG_WARN,
 		      "Error triggering a reseed of the kernel DRNG: %s\n",
 		      strerror(errno));
@@ -280,10 +371,56 @@ static size_t write_random(struct kernel_rng *rng, char *buf, size_t len,
 	return written;
 }
 
+/*
+ * Inject the data 90B-compliant considering the minimum n_out of 80 bits
+ * of the folded SHA-1 operation reading the input_pool.
+ *
+ * The following seeding strategy is applied to ensure SP800-90B compliance:
+ *
+ * - If the LRNG is present, 90B compliance is always given and no special
+ * handling is needed.
+ *
+ * - If the default /dev/random implementation is provided and the kernel offers
+ * the RNDRESEEDCRNG, use it after injecting 80 bits of entropy to feed
+ * the entropy into the ChaCha20 DRNG. In this case, the caller should use
+ * the getrandom(2) system call or /dev/urandom to get SP800-90B compliant
+ * data.
+ *
+ * - Kernels without the RNDRESEEDCRNG will never offer SP800-90B compliant
+ * data via /dev/urandom or getrandom(2). Those should always use /dev/random.
+ * In this case, the Jitter-RNG will feed only 80 bit chunks into the kernel.
+ * This means that after /dev/random consumed 80 bits, new data is requested
+ * from the Jitter-RNG.
+ */
+#define SHA1_FOLD_OUTPUT_SIZE	10
+static size_t write_random_90B(struct kernel_rng *rng, char *buf, size_t len,
+			       size_t entropy_bytes, int force_reseed)
+{
+	size_t written = 0, ptr;
+
+	for (ptr = 0; ptr < len; ptr += SHA1_FOLD_OUTPUT_SIZE) {
+		size_t todo = len - ptr, ent;
+
+		if (todo > SHA1_FOLD_OUTPUT_SIZE)
+			todo = SHA1_FOLD_OUTPUT_SIZE;
+
+		ent = todo;
+		if (ent > entropy_bytes)
+			ent = entropy_bytes;
+		entropy_bytes -= ent;
+
+		written += write_random(rng, buf + ptr, todo, ent,
+					force_reseed);
+	}
+
+	return written;
+}
+
 static size_t gather_entropy(struct kernel_rng *rng)
 {
 	sigset_t blocking_set, previous_set;
-	char buf[(ENTROPYBYTES * OVERSAMPLINGFACTOR)];
+	char buf[(ENTROPYBYTES * OVERSAMPLINGFACTOR * 2)];
+	size_t buflen = ENTROPYBYTES * OVERSAMPLINGFACTOR;
 	size_t ret = 0;
 
 	sigemptyset(&previous_set);
@@ -292,17 +429,59 @@ static size_t gather_entropy(struct kernel_rng *rng)
 
 	sigprocmask(SIG_BLOCK, &blocking_set, &previous_set);
 
-	if (0 > jent_read_entropy(rng->ec, buf, sizeof(buf))) {
-		dolog(LOG_WARN, "Cannot read entropy");
-		return 0;
+	if (lrng_present()) {
+		/*
+		 * The LRNG operates fully 90B compliant, no special handling
+		 * is necessary.
+		 */
+		if (0 > jent_read_entropy(rng->ec, buf, buflen)) {
+			dolog(LOG_WARN, "Cannot read entropy");
+			return 0;
+		}
+
+		/* LRNG seeds automatically */
+		ret = write_random(rng, buf, buflen, ENTROPYBYTES, 0);
+	} else if (kernver_ge(4, 17, 0)) {
+		/*
+		 * Generate twice the entropy data, once for the input_pool
+		 * and once for ChaCha20.
+		 */
+		if (0 > jent_read_entropy(rng->ec, buf, buflen * 2)) {
+			dolog(LOG_WARN, "Cannot read entropy");
+			return 0;
+		}
+		dolog(LOG_DEBUG, "Inject entropy into ChaCha20 DRNG");
+		ret = write_random_90B(rng, buf, buflen, ENTROPYBYTES, 1);
+		if (buflen != ret)
+			dolog(LOG_WARN,
+			      "Injected %lu bytes into %s, expected %d",
+			      ret, rng->dev, buflen);
+		dolog(LOG_DEBUG, "Inject entropy into input_pool");
+		ret += write_random_90B(rng, buf + buflen, buflen, ENTROPYBYTES,
+					0);
+		/* Indicate proper buffer length in logs below. */
+		buflen *= 2;
+	} else {
+		if (force_sp80090b)
+			buflen = SHA1_FOLD_OUTPUT_SIZE;
+
+		if (0 > jent_read_entropy(rng->ec, buf, buflen)) {
+			dolog(LOG_WARN, "Cannot read entropy");
+			return 0;
+		}
+
+		ret = write_random_90B(rng, buf, buflen,
+				       buflen / OVERSAMPLINGFACTOR, 0);
 	}
-	ret = write_random(rng, buf, sizeof(buf), ENTROPYBYTES);
-	if (sizeof(buf) != ret)
+
+	if (buflen != ret) {
 		dolog(LOG_WARN, "Injected %lu bytes into %s, expected %d",
-			ret, rng->dev, sizeof(buf));
-	else
-		ret = sizeof(buf);
-	memset_secure(buf, 0, sizeof(buf));
+		      ret, rng->dev, buflen);
+		ret = 0;
+	} else {
+		ret = buflen;
+	}
+	memset_secure(buf, 0, buflen);
 
 	sigprocmask(SIG_SETMASK, &previous_set, NULL);
 
@@ -319,7 +498,8 @@ static int read_entropy_avail(int fd)
 	lseek(fd, 0, SEEK_SET);
 
 	if (0 > data) {
-		dolog(LOG_WARN, "Error reading data from entropy_avail: %s", strerror(errno));
+		dolog(LOG_WARN, "Error reading data from entropy_avail: %s",
+		      strerror(errno));
 		return 0;
 	}
 	if (0 == data) {
@@ -376,17 +556,6 @@ static void sig_entropy_avail(int sig)
 out:
 	install_alarm();
 	return;
-}
-
-/* Is the LRNG present instead of the legacy /dev/random? */
-static int lrng_present(void)
-{
-	struct stat buf;
-	int ret = stat(LRNG_FILE, &buf);
-
-	if (ret == -1 && errno == ENOENT)
-		return 0;
-	return 1;
 }
 
 /* terminate the daemon cleanly */
@@ -513,7 +682,7 @@ static void dealloc_rng(struct kernel_rng *rng)
 static void dealloc(void)
 {
 	dealloc_rng(&Random);
-	if(0 != Entropy_avail_fd) {
+	if (0 != Entropy_avail_fd) {
 		close(Entropy_avail_fd);
 		Entropy_avail_fd = 0;
 	}
@@ -524,8 +693,6 @@ static void dealloc(void)
 		if (NULL != Pidfile)
 			unlink(Pidfile);
 	}
-
-	
 }
 
 static void create_pid_file(const char *pid_file)
@@ -558,7 +725,6 @@ static void create_pid_file(const char *pid_file)
 		exit(1);
 	}
 }
-
 
 static void daemonize(void)
 {
