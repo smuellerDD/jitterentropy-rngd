@@ -344,7 +344,6 @@ static size_t write_random(struct kernel_rng *rng, char *buf, size_t len,
 	rng->rpi->entropy_count = (entropy_bytes * 8);
 	rng->rpi->buf_size = len;
 	memcpy(rng->rpi->buf, buf, len);
-	memset(buf, 0, len);
 
 	ret = ioctl(rng->fd, RNDADDENTROPY, rng->rpi);
 	if (0 > ret)
@@ -398,6 +397,9 @@ static size_t write_random_90B(struct kernel_rng *rng, char *buf, size_t len,
 {
 	size_t written = 0, ptr;
 
+	if (!force_reseed)
+		return write_random(rng, buf, len, entropy_bytes, force_reseed);
+
 	for (ptr = 0; ptr < len; ptr += SHA1_FOLD_OUTPUT_SIZE) {
 		size_t todo = len - ptr, ent;
 
@@ -416,11 +418,21 @@ static size_t write_random_90B(struct kernel_rng *rng, char *buf, size_t len,
 	return written;
 }
 
-static size_t gather_entropy(struct kernel_rng *rng)
+static size_t gather_entropy(struct kernel_rng *rng, int init)
 {
 	sigset_t blocking_set, previous_set;
-	char buf[(ENTROPYBYTES * OVERSAMPLINGFACTOR * 2)];
-	size_t buflen = ENTROPYBYTES * OVERSAMPLINGFACTOR;
+#define ENTBLOCKSIZE	(ENTROPYBYTES * OVERSAMPLINGFACTOR)
+/*
+ * Maximum numbers of blocks is determined by numbers of reseed IOCTLs: if
+ * the reseed IOCTL is used, we call ceil(256 / 80) numbers of IOCTLs. As
+ * each IOCTL may drain the entropy pool by 256 bits, we need to ensure that
+ * after the numbers of IOCTLs, we finally inject more blocks than the numbers
+ * of IOCTLs into the input_pool. Otherwise the entropy estimator will never
+ * rise and we encounter an endless loop.
+ */
+#define ENTBLOCKS	(4 + 2 + 1)
+	char buf[(ENTBLOCKSIZE * ENTBLOCKS)];
+	size_t buflen = ENTBLOCKSIZE;
 	size_t ret = 0;
 
 	sigemptyset(&previous_set);
@@ -442,25 +454,32 @@ static size_t gather_entropy(struct kernel_rng *rng)
 		/* LRNG seeds automatically */
 		ret = write_random(rng, buf, buflen, ENTROPYBYTES, 0);
 	} else if (kernver_ge(4, 17, 0)) {
+		unsigned int numblocks = 1, i;
+
+		if (force_sp80090b || init) {
+			numblocks = ENTBLOCKS;
+			buflen *= numblocks;
+		}
+
 		/*
 		 * Generate twice the entropy data, once for the input_pool
 		 * and once for ChaCha20.
 		 */
-		if (0 > jent_read_entropy(rng->ec, buf, buflen * 2)) {
+		if (0 > jent_read_entropy(rng->ec, buf, buflen)) {
 			dolog(LOG_WARN, "Cannot read entropy");
 			return 0;
 		}
-		dolog(LOG_DEBUG, "Inject entropy into ChaCha20 DRNG");
-		ret = write_random_90B(rng, buf, buflen, ENTROPYBYTES, 1);
-		if (buflen != ret)
-			dolog(LOG_WARN,
-			      "Injected %lu bytes into %s, expected %d",
-			      ret, rng->dev, buflen);
-		dolog(LOG_DEBUG, "Inject entropy into input_pool");
-		ret += write_random_90B(rng, buf + buflen, buflen, ENTROPYBYTES,
-					0);
-		/* Indicate proper buffer length in logs below. */
-		buflen *= 2;
+		dolog(LOG_DEBUG, "Inject entropy into %s",
+		      force_sp80090b ? "ChaCha20 DRNG" : "input pool");
+		ret = write_random_90B(rng, buf, ENTBLOCKSIZE, ENTROPYBYTES,
+				       force_sp80090b || init);
+		numblocks--;
+
+		for (i = 0; i < numblocks; i++) {
+			dolog(LOG_DEBUG, "Inject entropy into input_pool");
+			ret += write_random_90B(rng, buf + ENTBLOCKSIZE * i,
+						ENTBLOCKSIZE, ENTROPYBYTES, 0);
+		}
 	} else {
 		if (force_sp80090b)
 			buflen = SHA1_FOLD_OUTPUT_SIZE;
@@ -478,8 +497,6 @@ static size_t gather_entropy(struct kernel_rng *rng)
 		dolog(LOG_WARN, "Injected %lu bytes into %s, expected %d",
 		      ret, rng->dev, buflen);
 		ret = 0;
-	} else {
-		ret = buflen;
 	}
 	memset_secure(buf, 0, buflen);
 
@@ -537,7 +554,7 @@ static void sig_entropy_avail(int sig)
 	if (--force_reseed == 0) {
 		force_reseed = FORCE_RESEED_WAKEUPS;
 		dolog(LOG_DEBUG, "Force reseed", entropy);
-		written = gather_entropy(&Random);
+		written = gather_entropy(&Random, 0);
 		dolog(LOG_VERBOSE, "%lu bytes written to /dev/random", written);
 		goto out;
 	}
@@ -551,7 +568,7 @@ static void sig_entropy_avail(int sig)
 		goto out;
 	}
 	dolog(LOG_DEBUG, "Insufficient entropy %d available", entropy);
-	written = gather_entropy(&Random);
+	written = gather_entropy(&Random, 0);
 	dolog(LOG_VERBOSE, "%lu bytes written to /dev/random", written);
 out:
 	install_alarm();
@@ -597,7 +614,7 @@ static void select_fd(void)
 			dolog(LOG_ERR, "Select returned with error %s", strerror(errno));
 		if (0 <= ret) {
 			dolog(LOG_VERBOSE, "Wakeup call for select on /dev/random");
-			written = gather_entropy(&Random);
+			written = gather_entropy(&Random, 0);
 			dolog(LOG_VERBOSE, "%lu bytes written to /dev/random", written);
 		}
 	}
@@ -656,7 +673,7 @@ static void alloc(void)
 	if (-1 == Entropy_avail_fd)
 		dolog(LOG_ERR, "Open of %s failed: %s", ENTROPYAVAIL, strerror(errno));
 
-	written = gather_entropy(&Random);
+	written = gather_entropy(&Random, 1);
 	dolog(LOG_VERBOSE, "%lu bytes written to /dev/random", written);
 }
 
