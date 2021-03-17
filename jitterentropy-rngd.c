@@ -359,7 +359,12 @@ static size_t write_random(struct kernel_rng *rng, char *buf, size_t len,
 	memset(rng->rpi->buf, 0, len);
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,17,0)
+	/*
+	 * The LRNG does not require this IOCTL as the reseed is automatically
+	 * triggered.
+	 */
 	if (force_reseed && kernver_ge(4, 17, 0) &&
+	    !lrng_present() &&
 	    ioctl(rng->fd, RNDRESEEDCRNG) < 0 && errno != EINVAL) {
 		dolog(LOG_WARN,
 		      "Error triggering a reseed of the kernel DRNG: %s\n",
