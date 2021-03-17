@@ -78,7 +78,7 @@ struct kernel_rng {
 };
 
 static struct kernel_rng Random = {
-	/*.fd = */ 0,
+	/*.fd = */ -1,
 	/*.ec = */ NULL,
 	/*.rpi = */ NULL,
 	/*.dev = */ "/dev/random"
@@ -94,11 +94,11 @@ static struct kernel_rng Urandom = {
 };
 */
 
-static int Pidfile_fd = 0;
+static int Pidfile_fd = -1;
 /* "/var/run/jitterentropy-rngd.pid" */
 static char *Pidfile = NULL;
 
-static int Entropy_avail_fd = 0;
+static int Entropy_avail_fd = -1;
 
 #define ENTROPYBYTES 32
 #define OVERSAMPLINGFACTOR 2
@@ -684,41 +684,6 @@ static void install_term(void)
  * allocation functions
  *******************************************************************/
 
-static void alloc_rng(struct kernel_rng *rng)
-{
-	rng->ec = jent_entropy_collector_alloc(1, 0);
-	if (!rng->ec)
-		dolog(LOG_ERR, "Allocation of entropy collector failed");
-
-	rng->rpi = malloc((sizeof(struct rand_pool_info) +
-			  (ENTROPYBYTES * OVERSAMPLINGFACTOR * sizeof(char))));
-	if (!rng->rpi)
-		dolog(LOG_ERR, "Cannot allocate memory for random bytes");
-
-	rng->fd = open(rng->dev, O_WRONLY);
-	if (-1 == rng->fd)
-		dolog(LOG_ERR, "Open of %s failed: %s", rng->dev, strerror(errno));
-}
-
-static void alloc(void)
-{
-	int ret = 0;
-	size_t written = 0;
-
-	ret = jent_entropy_init();
-	if (ret)
-		dolog(LOG_ERR, "The initialization of CPU Jitter RNG failed with error code %d\n", ret);
-
-	alloc_rng(&Random);
-
-	Entropy_avail_fd = open(ENTROPYAVAIL, O_RDONLY);
-	if (-1 == Entropy_avail_fd)
-		dolog(LOG_ERR, "Open of %s failed: %s", ENTROPYAVAIL, strerror(errno));
-
-	written = gather_entropy(&Random, 1);
-	dolog(LOG_VERBOSE, "%lu bytes written to /dev/random", written);
-}
-
 static void dealloc_rng(struct kernel_rng *rng)
 {
 	if (NULL != rng->ec) {
@@ -732,26 +697,84 @@ static void dealloc_rng(struct kernel_rng *rng)
 		free(rng->rpi);
 		rng->rpi = NULL;
 	}
-	if (0 != rng->fd) {
+	if (-1 != rng->fd) {
 		close(rng->fd);
-		rng->fd = 0;
+		rng->fd = -1;
 	}
 }
 
 static void dealloc(void)
 {
 	dealloc_rng(&Random);
-	if (0 != Entropy_avail_fd) {
+	if (-1 != Entropy_avail_fd) {
 		close(Entropy_avail_fd);
-		Entropy_avail_fd = 0;
+		Entropy_avail_fd = -1;
 	}
 
-	if (0 != Pidfile_fd) {
+	if (-1 != Pidfile_fd) {
 		close(Pidfile_fd);
-		Pidfile_fd = 0;
+		Pidfile_fd = -1;
 		if (NULL != Pidfile)
 			unlink(Pidfile);
 	}
+}
+
+static int alloc_rng(struct kernel_rng *rng)
+{
+	rng->ec = jent_entropy_collector_alloc(1, 0);
+	if (!rng->ec) {
+		dolog(LOG_ERR, "Allocation of entropy collector failed");
+		return -EAGAIN;
+	}
+
+	rng->rpi = malloc((sizeof(struct rand_pool_info) +
+			  (ENTROPYBYTES * OVERSAMPLINGFACTOR * sizeof(char))));
+	if (!rng->rpi) {
+		dolog(LOG_ERR, "Cannot allocate memory for random bytes");
+		dealloc_rng(rng);
+		return -ENOMEM;
+	}
+
+	rng->fd = open(rng->dev, O_WRONLY);
+	if (-1 == rng->fd) {
+		int errsv = errno;
+
+		dolog(LOG_ERR, "Open of %s failed: %s", rng->dev, strerror(errno));
+		dealloc_rng(rng);
+		return -errsv;
+	}
+
+	return 0;
+}
+
+static int alloc(void)
+{
+	int ret = 0;
+	size_t written = 0;
+
+	ret = jent_entropy_init();
+	if (ret) {
+		dolog(LOG_ERR, "The initialization of CPU Jitter RNG failed with error code %d\n", ret);
+		return ret;
+	}
+
+	ret = alloc_rng(&Random);
+	if (ret)
+		return ret;
+
+	Entropy_avail_fd = open(ENTROPYAVAIL, O_RDONLY);
+	if (-1 == Entropy_avail_fd) {
+		int errsv = errno;
+
+		dolog(LOG_ERR, "Open of %s failed: %s", ENTROPYAVAIL, strerror(errno));
+		dealloc();
+		return -errsv;
+	}
+
+	written = gather_entropy(&Random, 1);
+	dolog(LOG_VERBOSE, "%lu bytes written to /dev/random", written);
+
+	return 0;
 }
 
 static void create_pid_file(const char *pid_file)
@@ -828,12 +851,17 @@ static void daemonize(void)
 
 int main(int argc, char *argv[])
 {
+	int ret;
+
 	parse_opts(argc, argv);
 
 	if (geteuid())
 		dolog(LOG_ERR, "Program must start as root!");
 
-	alloc();
+	ret = alloc();
+	if (ret)
+		return -ret;
+
 	if (0 == Verbosity)
 		daemonize();
 	install_term();
