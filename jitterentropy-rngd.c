@@ -418,6 +418,48 @@ static size_t write_random_90B(struct kernel_rng *rng, char *buf, size_t len,
 	return written;
 }
 
+static ssize_t read_jent(struct kernel_rng *rng, char *buf, size_t buflen)
+{
+	unsigned int i;
+	ssize_t ret = jent_read_entropy(rng->ec, buf, buflen);
+
+	if (ret >= 0)
+		return ret;
+
+	dolog(LOG_WARN, "Cannot read entropy");
+
+	/* Only catch the FIPS test failures in the loop below */
+	if (ret != -2 && ret != -3)
+		return ret;
+
+	for (i = 1; i <= 10; i++) {
+		dolog(LOG_WARN,
+		      "Re-allocation attempt %u to clear permanent Jitter RNG error",
+		      i);
+
+		jent_entropy_collector_free(rng->ec);
+		rng->ec = jent_entropy_collector_alloc(1, 0);
+		if (!rng->ec) {
+			dolog(LOG_WARN,
+			      "Allocation of entropy collector failed");
+		} else {
+			ret = jent_read_entropy(rng->ec, buf, buflen);
+			if (ret >= 0)
+				return ret;
+
+			dolog(LOG_WARN, "Cannot read entropy");
+
+			if (ret != -2 && ret != -3)
+				return ret;
+		}
+	}
+
+	dolog(LOG_ERR,
+	      "Failed to allocate new Jitter RNG instance and obtain entropy");
+
+	return -EFAULT;
+}
+
 static size_t gather_entropy(struct kernel_rng *rng, int init)
 {
 	sigset_t blocking_set, previous_set;
@@ -446,10 +488,8 @@ static size_t gather_entropy(struct kernel_rng *rng, int init)
 		 * The LRNG operates fully 90B compliant, no special handling
 		 * is necessary.
 		 */
-		if (0 > jent_read_entropy(rng->ec, buf, buflen)) {
-			dolog(LOG_WARN, "Cannot read entropy");
+		if (read_jent(rng, buf, buflen) < 0)
 			return 0;
-		}
 
 		/* LRNG seeds automatically */
 		ret = write_random(rng, buf, buflen, ENTROPYBYTES, 0);
@@ -465,10 +505,9 @@ static size_t gather_entropy(struct kernel_rng *rng, int init)
 		 * Generate twice the entropy data, once for the input_pool
 		 * and once for ChaCha20.
 		 */
-		if (0 > jent_read_entropy(rng->ec, buf, buflen)) {
-			dolog(LOG_WARN, "Cannot read entropy");
+		if (read_jent(rng, buf, buflen) < 0)
 			return 0;
-		}
+
 		dolog(LOG_DEBUG, "Inject entropy into %s",
 		      force_sp80090b ? "ChaCha20 DRNG" : "input pool");
 		ret = write_random_90B(rng, buf, ENTBLOCKSIZE, ENTROPYBYTES,
@@ -484,10 +523,8 @@ static size_t gather_entropy(struct kernel_rng *rng, int init)
 		if (force_sp80090b)
 			buflen = SHA1_FOLD_OUTPUT_SIZE;
 
-		if (0 > jent_read_entropy(rng->ec, buf, buflen)) {
-			dolog(LOG_WARN, "Cannot read entropy");
+		if (read_jent(rng, buf, buflen) < 0)
 			return 0;
-		}
 
 		ret = write_random_90B(rng, buf, buflen,
 				       buflen / OVERSAMPLINGFACTOR, 0);
