@@ -23,6 +23,8 @@
 #include "jitterentropy-timer.h"
 #include "jitterentropy-sha3.h"
 
+#define BUILD_BUG_ON(condition) ((void)sizeof(char[1 - 2*!!(condition)]))
+
 /***************************************************************************
  * Noise sources
  ***************************************************************************/
@@ -46,14 +48,14 @@ static uint64_t jent_loop_shuffle(struct rand_data *ec,
 	(void)ec;
 	(void)bits;
 
-	return (1U<<min);
+	return (UINT64_C(1)<<min);
 
 #else /* JENT_CONF_DISABLE_LOOP_SHUFFLE */
 
 	uint64_t time = 0;
 	uint64_t shuffle = 0;
+	uint64_t mask = (UINT64_C(1)<<bits) - 1;
 	unsigned int i = 0;
-	unsigned int mask = (1U<<bits) - 1;
 
 	/*
 	 * Mix the current state of the random number into the shuffle
@@ -77,7 +79,7 @@ static uint64_t jent_loop_shuffle(struct rand_data *ec,
 	 * We add a lower boundary value to ensure we have a minimum
 	 * RNG loop count.
 	 */
-	return (shuffle + (1U<<min));
+	return (shuffle + (UINT64_C(1)<<min));
 
 #endif /* JENT_CONF_DISABLE_LOOP_SHUFFLE */
 }
@@ -106,10 +108,13 @@ static void jent_hash_time(struct rand_data *ec, uint64_t time,
 	uint64_t j = 0;
 #define MAX_HASH_LOOP 3
 #define MIN_HASH_LOOP 0
+
+	/* Ensure that macros cannot overflow jent_loop_shuffle() */
+	BUILD_BUG_ON((MAX_HASH_LOOP + MIN_HASH_LOOP) > 63);
 	uint64_t hash_loop_cnt =
 		jent_loop_shuffle(ec, MAX_HASH_LOOP, MIN_HASH_LOOP);
 
-	sha3_256_init(ctx);
+	sha3_256_init(&ctx);
 
 	/*
 	 * testing purposes -- allow test app to set the counter, not
@@ -124,9 +129,9 @@ static void jent_hash_time(struct rand_data *ec, uint64_t time,
 	 * same result.
 	 */
 	for (j = 0; j < hash_loop_cnt; j++) {
-		sha3_update(ctx, ec->data, SHA3_256_SIZE_DIGEST);
-		sha3_update(ctx, (uint8_t *)&time, sizeof(uint64_t));
-		sha3_update(ctx, (uint8_t *)&j, sizeof(uint64_t));
+		sha3_update(&ctx, ec->data, SHA3_256_SIZE_DIGEST);
+		sha3_update(&ctx, (uint8_t *)&time, sizeof(uint64_t));
+		sha3_update(&ctx, (uint8_t *)&j, sizeof(uint64_t));
 
 		/*
 		 * If the time stamp is stuck, do not finally insert the value
@@ -141,14 +146,100 @@ static void jent_hash_time(struct rand_data *ec, uint64_t time,
 		 * next loop iteration.
 		 */
 		if (stuck || (j < hash_loop_cnt - 1))
-			sha3_final(ctx, itermediary);
+			sha3_final(&ctx, itermediary);
 		else
-			sha3_final(ctx, ec->data);
+			sha3_final(&ctx, ec->data);
 	}
 
-	jent_memset_secure(ctx, SHA_MAX_CTX_SIZE);
+	jent_memset_secure(&ctx, SHA_MAX_CTX_SIZE);
 	jent_memset_secure(itermediary, sizeof(itermediary));
 }
+
+#define MAX_ACC_LOOP_BIT 7
+#define MIN_ACC_LOOP_BIT 0
+#ifdef JENT_RANDOM_MEMACCESS
+
+static inline uint32_t uint32rotl(const uint32_t x, int k)
+{
+	return (x << k) | (x >> (32 - k));
+}
+
+static inline uint32_t xoshiro128starstar(uint32_t *s)
+{
+	const uint32_t result = uint32rotl(s[1] * 5, 7) * 9;
+	const uint32_t t = s[1] << 9;
+
+	s[2] ^= s[0];
+	s[3] ^= s[1];
+	s[1] ^= s[2];
+	s[0] ^= s[3];
+
+	s[2] ^= t;
+
+	s[3] = uint32rotl(s[3], 11);
+
+	return result;
+}
+
+static void jent_memaccess(struct rand_data *ec, uint64_t loop_cnt)
+{
+	uint64_t i = 0;
+	union {
+		uint32_t u[4];
+		uint8_t b[sizeof(uint32_t) * 4];
+	} prngState;
+	uint32_t addressMask = ec->memmask;
+
+	/* Ensure that macros cannot overflow jent_loop_shuffle() */
+	BUILD_BUG_ON((MAX_ACC_LOOP_BIT + MIN_ACC_LOOP_BIT) > 63);
+	uint64_t acc_loop_cnt =
+		jent_loop_shuffle(ec, MAX_ACC_LOOP_BIT, MIN_ACC_LOOP_BIT);
+
+	if (NULL == ec || NULL == ec->mem)
+		return;
+
+	prngState.u[0] = 0x8e93eec0;
+	prngState.u[1] = 0xce65608a;
+	prngState.u[2] = 0xa8d46b46;
+	prngState.u[3] = 0xe83cef69;
+
+	/*
+	 * Mix the current data into prngState
+	 *
+	 * Any time you see a PRNG in a noise source, you should be concerned.
+	 *
+	 * The PRNG doesn’t directly produce the raw noise, it just adjusts the
+	 * location being updated. The timing of the update is part of the raw
+	 * sample. The main thing this process gets you isn’t better
+	 * “per-update” timing, it gets you mostly independent “per-update”
+	 * timing, so we can now benefit from the Central Limit Theorem!
+	 */
+	for (i = 0; i < sizeof(prngState); i++)
+		prngState.b[i] ^= ec->data[i];
+
+	/*
+	 * testing purposes -- allow test app to set the counter, not
+	 * needed during runtime
+	 */
+	if (loop_cnt)
+		acc_loop_cnt = loop_cnt;
+
+	for (i = 0; i < (ec->memaccessloops + acc_loop_cnt); i++) {
+		/* Take PRNG output to find the memory location to update. */
+		unsigned char *tmpval = ec->mem +
+					(xoshiro128starstar(prngState.u) &
+					 addressMask);
+
+		/*
+		 * memory access: just add 1 to one byte,
+		 * wrap at 255 -- memory access implies read
+		 * from and write to memory location
+		 */
+		*tmpval = (unsigned char)((*tmpval + 1) & 0xff);
+	}
+}
+
+#else /* JENT_RANDOM_MEMACCESS */
 
 /**
  * Memory Access noise source -- this is a noise source based on variations in
@@ -178,8 +269,9 @@ static void jent_memaccess(struct rand_data *ec, uint64_t loop_cnt)
 {
 	unsigned int wrap = 0;
 	uint64_t i = 0;
-#define MAX_ACC_LOOP_BIT 7
-#define MIN_ACC_LOOP_BIT 0
+
+	/* Ensure that macros cannot overflow jent_loop_shuffle() */
+	BUILD_BUG_ON((MAX_ACC_LOOP_BIT + MIN_ACC_LOOP_BIT) > 63);
 	uint64_t acc_loop_cnt =
 		jent_loop_shuffle(ec, MAX_ACC_LOOP_BIT, MIN_ACC_LOOP_BIT);
 
@@ -210,6 +302,8 @@ static void jent_memaccess(struct rand_data *ec, uint64_t loop_cnt)
 		ec->memlocation = ec->memlocation % wrap;
 	}
 }
+
+#endif /* JENT_RANDOM_MEMACCESS */
 
 /***************************************************************************
  * Start of entropy processing logic

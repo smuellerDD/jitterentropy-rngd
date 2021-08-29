@@ -1,3 +1,6 @@
+1.2.4:
+ * enhancement: use Jitter RNG library 3.2.0
+
 1.2.3:
  * enhancement: use Jitter RNG library 3.1.0
 

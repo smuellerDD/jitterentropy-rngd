@@ -42,7 +42,7 @@
 		      * require consumer to be updated (as long as this number
 		      * is zero, the API is not considered stable and can
 		      * change without a bump of the major version) */
-#define MINVERSION 1 /* API compatible, ABI may change, functional
+#define MINVERSION 2 /* API compatible, ABI may change, functional
 		      * enhancements only, consumer can be left unchanged if
 		      * enhancements are not considered */
 #define PATCHLEVEL 0 /* API / ABI compatible, no functional changes, no
@@ -239,8 +239,8 @@ ssize_t jent_read_entropy_safe(struct rand_data **ec, char *data, size_t len)
 			/* re-allocate entropy collector with higher OSR */
 			jent_entropy_collector_free(*ec);
 
-			/* Perform new health test */
-			if (jent_entropy_init())
+			/* Perform new health test with updated OSR */
+			if (jent_entropy_init_ex(osr, flags))
 				return -1;
 
 			*ec = jent_entropy_collector_alloc(osr, flags);
@@ -261,6 +261,8 @@ ssize_t jent_read_entropy_safe(struct rand_data **ec, char *data, size_t len)
  * Initialization logic
  ***************************************************************************/
 
+static int jent_selftest_run = 0;
+
 static struct rand_data
 *jent_entropy_collector_alloc_internal(unsigned int osr,
 				       unsigned int flags)
@@ -275,6 +277,11 @@ static struct rand_data
 	    (flags & JENT_FORCE_INTERNAL_TIMER))
 		return NULL;
 
+	/* Force the self test to be run */
+	if (!jent_selftest_run && jent_entropy_init_ex(osr, flags))
+		return NULL;
+
+
 	/*
 	 * If the initial test code concludes to force the internal timer
 	 * and the user requests it not to be used, do not allocate
@@ -288,16 +295,35 @@ static struct rand_data
 		return NULL;
 
 	if (!(flags & JENT_DISABLE_MEMORY_ACCESS)) {
-		/* Allocate memory for adding variations based on memory
+		/*
+		 * Allocate memory for adding variations based on memory
 		 * access
 		 */
-		entropy_collector->mem = 
-			(unsigned char *)jent_zalloc(JENT_MEMORY_SIZE);
-		if (entropy_collector->mem == NULL)
+		uint32_t memsize = jent_cache_size_roundup();
+
+		if (!memsize)
+			memsize = JENT_MEMORY_SIZE;
+		entropy_collector->mem = (unsigned char *)jent_zalloc(memsize);
+
+#ifdef JENT_RANDOM_MEMACCESS
+		/*
+		 * Transform the size into a mask - it is assumed that size is
+		 * a power of 2.
+		 */
+		entropy_collector->memmask = memsize - 1;
+#else /* JENT_RANDOM_MEMACCESS */
+		entropy_collector->memblocksize = memsize / JENT_MEMORY_BLOCKS;
+		entropy_collector->memblocks = JENT_MEMORY_BLOCKS;
+
+		/* sanity check */
+		if (entropy_collector->memblocksize *
+		    entropy_collector->memblocks != memsize)
 			goto err;
 
-		entropy_collector->memblocksize = JENT_MEMORY_BLOCKSIZE;
-		entropy_collector->memblocks = JENT_MEMORY_BLOCKS;
+#endif /* JENT_RANDOM_MEMACCESS */
+
+		if (entropy_collector->mem == NULL)
+			goto err;
 		entropy_collector->memaccessloops = JENT_MEMORY_ACCESSLOOPS;
 	}
 
@@ -326,7 +352,10 @@ static struct rand_data
 		entropy_collector->jent_common_timer_gcd = 1;
 	}
 
-	/* Use timer-less noise source */
+	/*
+	 * Use timer-less noise source - note, OSR must be set in
+	 * entropy_collector!
+	 */
 	if (!(flags & JENT_DISABLE_INTERNAL_TIMER)) {
 		if (jent_notime_enable(entropy_collector, flags))
 			goto err;
@@ -375,7 +404,8 @@ void jent_entropy_collector_free(struct rand_data *entropy_collector)
 	}
 }
 
-int jent_time_entropy_init(unsigned int enable_notime)
+
+int jent_time_entropy_init(unsigned int osr, unsigned int flags)
 {
 	struct rand_data *ec;
 	uint64_t *delta_history;
@@ -386,8 +416,11 @@ int jent_time_entropy_init(unsigned int enable_notime)
 	if (!delta_history)
 		return EMEM;
 
-	if (enable_notime)
+
+	if (flags & JENT_FORCE_INTERNAL_TIMER)
 		jent_notime_force();
+	else
+		flags |= JENT_DISABLE_INTERNAL_TIMER;
 
 	/*
 	 * If the start-up health tests (including the APT and RCT) are not
@@ -398,9 +431,8 @@ int jent_time_entropy_init(unsigned int enable_notime)
 	 * amount of data that we have, which should not fail unless things
 	 * are really bad.
 	 */
-	ec = jent_entropy_collector_alloc_internal(0, JENT_FORCE_FIPS |
-				(enable_notime ? JENT_FORCE_INTERNAL_TIMER :
-						 JENT_DISABLE_INTERNAL_TIMER));
+	flags |= JENT_FORCE_FIPS;
+	ec = jent_entropy_collector_alloc_internal(osr, flags);
 	if (!ec) {
 		ret = EMEM;
 		goto out;
@@ -472,6 +504,18 @@ int jent_time_entropy_init(unsigned int enable_notime)
 		jent_gcd_add_value(delta_history, delta, i);
 	}
 
+	/*
+	 * we allow up to three times the time running backwards.
+	 * CLOCK_REALTIME is affected by adjtime and NTP operations. Thus,
+	 * if such an operation just happens to interfere with our test, it
+	 * should not fail. The value of 3 should cover the NTP case being
+	 * performed during our test run.
+	 */
+	if (time_backwards > 3) {
+		ret = ENOMONOTONIC;
+		goto out;
+	}
+
 	/* First, did we encounter a health test failure? */
 	if ((health_test_result = jent_health_failure(ec))) {
 		ret = (health_test_result & JENT_RCT_FAILURE) ? ERCT : EHEALTH;
@@ -492,7 +536,7 @@ int jent_time_entropy_init(unsigned int enable_notime)
 out:
 	jent_gcd_fini(delta_history, JENT_POWERUP_TESTLOOPCOUNT);
 
-	if (enable_notime && ec)
+	if ((flags & JENT_FORCE_INTERNAL_TIMER) && ec)
 		jent_notime_unsettick(ec);
 
 	jent_entropy_collector_free(ec);
@@ -500,8 +544,7 @@ out:
 	return ret;
 }
 
-JENT_PRIVATE_STATIC
-int jent_entropy_init(void)
+static inline int jent_entropy_init_common_pre(void)
 {
 	int ret;
 
@@ -510,14 +553,61 @@ int jent_entropy_init(void)
 	if (sha3_tester())
 		return EHASH;
 
-	ret = jent_time_entropy_init(0);
+	ret = jent_gcd_selftest();
+
+	jent_selftest_run = 1;
+
+	return ret;
+}
+
+static inline int jent_entropy_init_common_post(int ret)
+{
+	/* Unmark the execution of the self tests if they failed. */
+	if (ret)
+		jent_selftest_run = 0;
+
+	return ret;
+}
+
+JENT_PRIVATE_STATIC
+int jent_entropy_init(void)
+{
+	int ret = jent_entropy_init_common_pre();
+
+	if (ret)
+		return ret;
+
+	ret = jent_time_entropy_init(0, JENT_DISABLE_INTERNAL_TIMER);
 
 #ifdef JENT_CONF_ENABLE_INTERNAL_TIMER
 	if (ret)
-		ret = jent_time_entropy_init(1);
+		ret = jent_time_entropy_init(0, JENT_FORCE_INTERNAL_TIMER);
 #endif /* JENT_CONF_ENABLE_INTERNAL_TIMER */
 
-	return ret;
+	return jent_entropy_init_common_post(ret);
+}
+
+JENT_PRIVATE_STATIC
+int jent_entropy_init_ex(unsigned int osr, unsigned int flags)
+{
+	int ret = jent_entropy_init_common_pre();
+
+	if (ret)
+		return ret;
+
+	/* Test without internal timer unless caller does not want it */
+	if (!(flags & JENT_FORCE_INTERNAL_TIMER))
+		ret = jent_time_entropy_init(osr,
+					flags | JENT_DISABLE_INTERNAL_TIMER);
+
+#ifdef JENT_CONF_ENABLE_INTERNAL_TIMER
+	/* Test with internal timer unless caller does not want it */
+	if (ret && !(flags & JENT_DISABLE_INTERNAL_TIMER))
+		ret = jent_time_entropy_init(osr,
+					     flags | JENT_FORCE_INTERNAL_TIMER);
+#endif /* JENT_CONF_ENABLE_INTERNAL_TIMER */
+
+	return jent_entropy_init_common_post(ret);
 }
 
 JENT_PRIVATE_STATIC

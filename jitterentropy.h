@@ -85,6 +85,12 @@
  */
 #define JENT_HEALTH_LAG_PREDICTOR
 
+/*
+ * Shall the jent_memaccess use a (statistically) random selection for the
+ * memory to update?
+ */
+#define JENT_RANDOM_MEMACCESS
+
 /***************************************************************************
  * Jitter RNG State Definition Section
  ***************************************************************************/
@@ -171,19 +177,33 @@ struct rand_data
 
 	unsigned int flags;		/* Flags used to initialize */
 	unsigned int osr;		/* Oversampling rate */
-#ifndef JENT_MEMORY_BLOCKS
-# define JENT_MEMORY_BLOCKS 512
-#endif
-#ifndef JENT_MEMORY_BLOCKSIZE
-# define JENT_MEMORY_BLOCKSIZE 128
-#endif
+
+#ifdef JENT_RANDOM_MEMACCESS
+  /* The step size should be larger than the cacheline size. */
+# ifndef JENT_MEMORY_BITS
+#  define JENT_MEMORY_BITS 17
+# endif
+# define JENT_MEMORY_SIZE (UINT32_C(1)<<JENT_MEMORY_BITS)
+#else /* JENT_RANDOM_MEMACCESS */
+# ifndef JENT_MEMORY_BLOCKS
+#  define JENT_MEMORY_BLOCKS 512
+# endif
+# ifndef JENT_MEMORY_BLOCKSIZE
+#  define JENT_MEMORY_BLOCKSIZE 128
+# endif
+# define JENT_MEMORY_SIZE (JENT_MEMORY_BLOCKS*JENT_MEMORY_BLOCKSIZE)
+#endif /* JENT_RANDOM_MEMACCESS */
+
 #define JENT_MEMORY_ACCESSLOOPS 128
-#define JENT_MEMORY_SIZE (JENT_MEMORY_BLOCKS*JENT_MEMORY_BLOCKSIZE)
 	unsigned char *mem;		/* Memory access location with size of
-					 * memblocks * memblocksize */
+					 * JENT_MEMORY_SIZE or memsize */
+#ifdef JENT_RANDOM_MEMACCESS
+	uint32_t memmask;		/* Memory mask (size of memory - 1) */
+#else
 	unsigned int memlocation; 	/* Pointer to byte in *mem */
 	unsigned int memblocks;		/* Number of memory blocks in *mem */
 	unsigned int memblocksize; 	/* Size of one memory block in bytes */
+#endif
 	unsigned int memaccessloops;	/* Number of memory accesses per random
 					 * bit generation */
 
@@ -313,6 +333,8 @@ struct rand_data
 /* get raw entropy */
 JENT_PRIVATE_STATIC
 ssize_t jent_read_entropy(struct rand_data *ec, char *data, size_t len);
+JENT_PRIVATE_STATIC
+ssize_t jent_read_entropy_safe(struct rand_data **ec, char *data, size_t len);
 /* initialize an instance of the entropy collector */
 JENT_PRIVATE_STATIC
 struct rand_data *jent_entropy_collector_alloc(unsigned int osr,
@@ -324,6 +346,8 @@ void jent_entropy_collector_free(struct rand_data *entropy_collector);
 /* initialization of entropy collector */
 JENT_PRIVATE_STATIC
 int jent_entropy_init(void);
+JENT_PRIVATE_STATIC
+int jent_entropy_init_ex(unsigned int osr, unsigned int flags);
 
 /* return version number of core library */
 JENT_PRIVATE_STATIC
@@ -373,6 +397,7 @@ static inline void jent_notime_fini(void *ctx) { (void)ctx; }
 #define ERCT		10 /* RCT failed during initialization */
 #define EHASH		11 /* Hash self test failed */
 #define EMEM		12 /* Can't allocate memory for initialization */
+#define EGCD		13 /* GCD self-test failed */
 /* -- END error codes for init function -- */
 
 /* -- BEGIN error masks for health tests -- */

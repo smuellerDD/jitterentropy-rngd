@@ -64,7 +64,7 @@
 #define MINVERSION 2 /* API compatible, ABI may change, functional
 		      * enhancements only, consumer can be left unchanged if
 		      * enhancements are not considered */
-#define PATCHLEVEL 3 /* API / ABI compatible, no functional changes, no
+#define PATCHLEVEL 4 /* API / ABI compatible, no functional changes, no
 		      * enhancements, bug fixes only */
 
 static int Verbosity = 0;
@@ -425,42 +425,12 @@ static size_t write_random_90B(struct kernel_rng *rng, char *buf, size_t len,
 
 static ssize_t read_jent(struct kernel_rng *rng, char *buf, size_t buflen)
 {
-	unsigned int i;
-	ssize_t ret = jent_read_entropy(rng->ec, buf, buflen);
+	ssize_t ret = jent_read_entropy_safe(&rng->ec, buf, buflen);
 
 	if (ret >= 0)
 		return ret;
 
 	dolog(LOG_WARN, "Cannot read entropy");
-
-	/* Only catch the FIPS test failures in the loop below */
-	if (ret != -2 && ret != -3)
-		return ret;
-
-	for (i = 1; i <= 10; i++) {
-		dolog(LOG_WARN,
-		      "Re-allocation attempt %u to clear permanent Jitter RNG error",
-		      i);
-
-		jent_entropy_collector_free(rng->ec);
-		rng->ec = jent_entropy_collector_alloc(1, 0);
-		if (!rng->ec) {
-			dolog(LOG_WARN,
-			      "Allocation of entropy collector failed");
-		} else {
-			ret = jent_read_entropy(rng->ec, buf, buflen);
-			if (ret >= 0)
-				return ret;
-
-			dolog(LOG_WARN, "Cannot read entropy");
-
-			if (ret != -2 && ret != -3)
-				return ret;
-		}
-	}
-
-	dolog(LOG_ERR,
-	      "Failed to allocate new Jitter RNG instance and obtain entropy");
 
 	return -EFAULT;
 }

@@ -53,14 +53,17 @@ static inline uint64_t jent_gcd64(uint64_t a, uint64_t b)
 	return a;
 }
 
-int jent_gcd_analyze(uint64_t *delta_history, size_t nelem)
+static int jent_gcd_analyze_internal(uint64_t *delta_history, size_t nelem,
+				     uint64_t *running_gcd_out,
+				     uint64_t *delta_sum_out)
 {
-	uint64_t running_gcd = 0, delta_sum = 0;
+	uint64_t running_gcd, delta_sum = 0;
 	size_t i;
-	int ret = 0;
 
 	if (!delta_history)
-		return 0;
+		return -EAGAIN;
+
+	running_gcd = delta_history[0];
 
 	/* Now perform the analysis on the accumulated delta data. */
 	for (i = 1; i < nelem; i++) {
@@ -85,6 +88,21 @@ int jent_gcd_analyze(uint64_t *delta_history, size_t nelem)
 		 */
 		running_gcd = jent_gcd64(delta_history[i], running_gcd);
 	}
+
+	*running_gcd_out = running_gcd;
+	*delta_sum_out = delta_sum;
+
+	return 0;
+}
+
+int jent_gcd_analyze(uint64_t *delta_history, size_t nelem)
+{
+	uint64_t running_gcd, delta_sum;
+	int ret = jent_gcd_analyze_internal(delta_history, nelem, &running_gcd,
+					    &delta_sum);
+
+	if (ret == -EAGAIN)
+		return 0;
 
 	/*
 	 * Variations of deltas of time must on average be larger than 1 to
@@ -138,4 +156,33 @@ int jent_gcd_get(uint64_t *value)
 
 	*value = jent_common_timer_gcd;
 	return 0;
+}
+
+int jent_gcd_selftest(void)
+{
+#define JENT_GCD_SELFTEST_ELEM 10
+#define JENT_GCD_SELFTEST_EXP 3ULL
+	uint64_t *gcd = jent_gcd_init(JENT_GCD_SELFTEST_ELEM);
+	uint64_t running_gcd, delta_sum;
+	unsigned int i;
+	int ret = EGCD;
+
+	if (!gcd)
+		return EMEM;
+
+	for (i = 0; i < JENT_GCD_SELFTEST_ELEM; i++)
+		jent_gcd_add_value(gcd, i * JENT_GCD_SELFTEST_EXP, i);
+
+	if (jent_gcd_analyze_internal(gcd, JENT_GCD_SELFTEST_ELEM,
+				      &running_gcd, &delta_sum))
+		goto out;
+
+	if (running_gcd != JENT_GCD_SELFTEST_EXP)
+		goto out;
+
+	ret = 0;
+
+out:
+	jent_gcd_fini(gcd, JENT_GCD_SELFTEST_ELEM);
+	return ret;
 }
