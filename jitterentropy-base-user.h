@@ -336,7 +336,6 @@ static inline uint32_t jent_cache_size_roundup(void)
 			cache_size += (uint32_t)l2;
 		if (l3 > 0)
 			cache_size += (uint32_t)l3;
-printf("%ld %ld %ld\n", l1, l2 ,l3);
 	}
 
 	/* Force the output_size to be of the form (bounding_power_of_2 - 1). */
