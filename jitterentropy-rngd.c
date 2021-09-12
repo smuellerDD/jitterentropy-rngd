@@ -64,7 +64,7 @@
 #define MINVERSION 2 /* API compatible, ABI may change, functional
 		      * enhancements only, consumer can be left unchanged if
 		      * enhancements are not considered */
-#define PATCHLEVEL 4 /* API / ABI compatible, no functional changes, no
+#define PATCHLEVEL 5 /* API / ABI compatible, no functional changes, no
 		      * enhancements, bug fixes only */
 
 static int Verbosity = 0;
@@ -99,6 +99,7 @@ static int Pidfile_fd = -1;
 static char *Pidfile = NULL;
 
 static int Entropy_avail_fd = -1;
+static unsigned int jent_flags = 0;
 
 #define ENTROPYBYTES 32
 #define OVERSAMPLINGFACTOR 2
@@ -218,7 +219,8 @@ static void usage(void)
 	fprintf(stderr, "\t\t\tVerbose logging implies running in foreground\n");
 	fprintf(stderr, "\t-p --pid\tWrite daemon PID to file\n");
 	fprintf(stderr, "\t-s --sp800-90b\tForce SP800-90B compliance\n");
-	fprintf(stderr, "LRNG presence %sdetected\n",
+	fprintf(stderr, "\t-f --flags\tInteger with flags used to allocate Jitter RNG\n");
+	fprintf(stderr, "\nLRNG presence %sdetected\n",
 		lrng_present() ? "" : "not ");
 	exit(1);
 }
@@ -236,9 +238,10 @@ static void parse_opts(int argc, char *argv[])
 			{"help", 0, 0, 0},
 			{"version", 0, 0, 0},
 			{"sp800-90b", 0, 0, 0},
+			{"flags", 1, 0, 0},
 			{0, 0, 0, 0}
 		};
-		c = getopt_long(argc, argv, "svp:h", opts, &opt_index);
+		c = getopt_long(argc, argv, "svp:hf:", opts, &opt_index);
 		if (-1 == c)
 			break;
 		switch (c) {
@@ -262,6 +265,16 @@ static void parse_opts(int argc, char *argv[])
 			case 4:
 				force_sp80090b = 1;
 				break;
+			case 5:
+			{
+				unsigned long val = strtoul(optarg, NULL, 10);
+
+				if (val > UINT_MAX)
+					usage();
+				jent_flags = (unsigned int)val;
+
+				break;
+			}
 			default:
 				usage();
 			}
@@ -691,7 +704,7 @@ static void dealloc(void)
 
 static int alloc_rng(struct kernel_rng *rng)
 {
-	rng->ec = jent_entropy_collector_alloc(1, 0);
+	rng->ec = jent_entropy_collector_alloc(1, jent_flags);
 	if (!rng->ec) {
 		dolog(LOG_ERR, "Allocation of entropy collector failed");
 		return -EAGAIN;
