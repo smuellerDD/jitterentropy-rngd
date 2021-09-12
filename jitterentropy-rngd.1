@@ -87,6 +87,16 @@ displays the help text
 \fB\-\-version\fR
 returns the version number of the
 .IR jitterentropy-rngd .
+.TP
+\fB\-s\fR, \fB\-\-sp800-90b\fR
+triggers a specific seeding strategy of the kernel /dev/random
+device to insert entropy that ensures the ChaCha20 DRNG behind
+/dev/random receives 256 bits of entropy as defined by SP800-90B.
+.TP
+\fB\-f\fR, \fB\-\-flags\fR [\fI\,FLAGS\/\fR]
+allows specifying the flags value documented with
+.IR jitterentropy(3)
+when allocating the Jitter RNG.
 .PP
 .SH NOTES
 The
