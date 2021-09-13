@@ -100,6 +100,7 @@ static char *Pidfile = NULL;
 
 static int Entropy_avail_fd = -1;
 static unsigned int jent_flags = 0;
+static unsigned int jent_osr = 1;
 
 #define ENTROPYBYTES 32
 #define OVERSAMPLINGFACTOR 2
@@ -220,6 +221,7 @@ static void usage(void)
 	fprintf(stderr, "\t-p --pid\tWrite daemon PID to file\n");
 	fprintf(stderr, "\t-s --sp800-90b\tForce SP800-90B compliance\n");
 	fprintf(stderr, "\t-f --flags\tInteger with flags used to allocate Jitter RNG\n");
+	fprintf(stderr, "\t-o --osr\tInteger with OSR used to allocate Jitter RNG\n");
 	fprintf(stderr, "\nLRNG presence %sdetected\n",
 		lrng_present() ? "" : "not ");
 	exit(1);
@@ -239,9 +241,10 @@ static void parse_opts(int argc, char *argv[])
 			{"version", 0, 0, 0},
 			{"sp800-90b", 0, 0, 0},
 			{"flags", 1, 0, 0},
+			{"osr", 1, 0, 0},
 			{0, 0, 0, 0}
 		};
-		c = getopt_long(argc, argv, "svp:hf:", opts, &opt_index);
+		c = getopt_long(argc, argv, "svp:hf:o:", opts, &opt_index);
 		if (-1 == c)
 			break;
 		switch (c) {
@@ -272,6 +275,16 @@ static void parse_opts(int argc, char *argv[])
 				if (val > UINT_MAX)
 					usage();
 				jent_flags = (unsigned int)val;
+
+				break;
+			}
+			case 6:
+			{
+				unsigned long val = strtoul(optarg, NULL, 10);
+
+				if (val > UINT_MAX)
+					usage();
+				jent_osr = (unsigned int)val;
 
 				break;
 			}
@@ -704,7 +717,7 @@ static void dealloc(void)
 
 static int alloc_rng(struct kernel_rng *rng)
 {
-	rng->ec = jent_entropy_collector_alloc(1, jent_flags);
+	rng->ec = jent_entropy_collector_alloc(jent_osr, jent_flags);
 	if (!rng->ec) {
 		dolog(LOG_ERR, "Allocation of entropy collector failed");
 		return -EAGAIN;
@@ -735,7 +748,7 @@ static int alloc(void)
 	int ret = 0;
 	size_t written = 0;
 
-	ret = jent_entropy_init();
+	ret = jent_entropy_init_ex(jent_osr, jent_flags);
 	if (ret) {
 		dolog(LOG_ERR, "The initialization of CPU Jitter RNG failed with error code %d\n", ret);
 		return ret;
