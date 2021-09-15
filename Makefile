@@ -38,13 +38,25 @@ CFLAGS += $(foreach includedir,$(INCLUDE_DIRS),-I$(includedir))
 LDFLAGS += $(foreach librarydir,$(LIBRARY_DIRS),-L$(librarydir))
 LDFLAGS += $(foreach library,$(LIBRARIES),-l$(library))
 
-.PHONY: all clean distclean
+analyze_srcs = $(filter %.c, $(sort $(C_SRCS)))
+analyze_plists = $(analyze_srcs:%.c=%.plist)
+
+.PHONY: all scan clean distclean
 
 all: $(NAME)
 
 $(NAME): $(OBJS)
 #	scan-build --use-analyzer=/usr/bin/clang $(CC) $(OBJS) -o $(NAME) $(LDFLAGS)
 	$(CC) $(OBJS) -o $(NAME) $(LDFLAGS)
+
+$(analyze_plists): %.plist: %.c
+	@echo "  CCSA  " $@
+	clang --analyze $(CFLAGS) $< -o $@
+
+scan: $(analyze_plists)
+
+cppcheck:
+	cppcheck --force -q --enable=performance --enable=warning --enable=portability *.h *.c
 
 strip: $(NAME)
 	$(STRIP) --strip-unneeded $(NAME)
@@ -60,5 +72,6 @@ clean:
 	@- $(RM) $(NAME)
 	@- $(RM) $(OBJS)
 	@- $(RM) jitterentropy.service
+	@- $(RM) $(analyze_plists)
 
 distclean: clean
