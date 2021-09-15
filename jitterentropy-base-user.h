@@ -290,12 +290,12 @@ static inline void jent_get_cachesize(long *l1, long *l2, long *l3)
 		ext = strstr(buf, "K");
 		if (ext) {
 			shift = 10;
-			ext = '\0';
+			*ext = '\0';
 		} else {
 			ext = strstr(buf, "M");
 			if (ext) {
 				shift = 20;
-				ext = '\0';
+				*ext = '\0';
 			}
 		}
 
@@ -351,9 +351,9 @@ static inline uint32_t jent_cache_size_roundup(void)
 			return 0;
 
 		/*
-		* Make the output_size the smallest power of 2 strictly
-		* greater than cache_size.
-		*/
+		 * Make the output_size the smallest power of 2 strictly
+		 * greater than cache_size.
+		 */
 		cache_size++;
 	}
 
