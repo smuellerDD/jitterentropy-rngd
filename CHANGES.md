@@ -1,3 +1,6 @@
+1.2.6:
+ * enhancement: use Jitter RNG library 3.3.1
+
 1.2.5:
  * enhancement: use Jitter RNG library 3.3.0
  * enhancement: add --flags command line option to allow specifying the integer value used as flags field to allocate the Jitter RNG - see jitterentropy(3) for details
