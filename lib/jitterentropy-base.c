@@ -45,7 +45,7 @@
 #define MINVERSION 3 /* API compatible, ABI may change, functional
 		      * enhancements only, consumer can be left unchanged if
 		      * enhancements are not considered */
-#define PATCHLEVEL 0 /* API / ABI compatible, no functional changes, no
+#define PATCHLEVEL 1 /* API / ABI compatible, no functional changes, no
 		      * enhancements, bug fixes only */
 
 /***************************************************************************
@@ -379,6 +379,7 @@ static struct rand_data
 *jent_entropy_collector_alloc_internal(unsigned int osr, unsigned int flags)
 {
 	struct rand_data *entropy_collector;
+	uint32_t memsize = 0;
 
 	/*
 	 * Requesting disabling and forcing of internal timer
@@ -405,8 +406,7 @@ static struct rand_data
 		return NULL;
 
 	if (!(flags & JENT_DISABLE_MEMORY_ACCESS)) {
-		uint32_t memsize = jent_memsize(flags);
-
+		memsize = jent_memsize(flags);
 		entropy_collector->mem = (unsigned char *)jent_zalloc(memsize);
 
 #ifdef JENT_RANDOM_MEMACCESS
@@ -469,7 +469,7 @@ static struct rand_data
 
 err:
 	if (entropy_collector->mem != NULL)
-		jent_zfree(entropy_collector->mem, JENT_MEMORY_SIZE);
+		jent_zfree(entropy_collector->mem, memsize);
 	jent_zfree(entropy_collector, sizeof(struct rand_data));
 	return NULL;
 }
@@ -709,6 +709,8 @@ int jent_entropy_init_ex(unsigned int osr, unsigned int flags)
 
 	if (ret)
 		return ret;
+
+	ret = ENOTIME;
 
 	/* Test without internal timer unless caller does not want it */
 	if (!(flags & JENT_FORCE_INTERNAL_TIMER))
