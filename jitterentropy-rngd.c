@@ -99,12 +99,12 @@ static int Pidfile_fd = -1;
 static char *Pidfile = NULL;
 
 static int Entropy_avail_fd = -1;
+static int Entropy_thresh_fd = -1;
 static unsigned int jent_flags = 0;
 static unsigned int jent_osr = 1;
 
 #define ENTROPYBYTES 32
 #define OVERSAMPLINGFACTOR 2
-#define ENTROPYTHRESH 1024
 /*
  * After FORCE_RESEED_WAKEUPS, the installed alarm handler will unconditionally
  * trigger a reseed irrespective of the seed level. This ensures that new
@@ -113,6 +113,7 @@ static unsigned int jent_osr = 1;
  */
 #define FORCE_RESEED_WAKEUPS	120
 #define ENTROPYAVAIL "/proc/sys/kernel/random/entropy_avail"
+#define ENTROPYTHRESH "/proc/sys/kernel/random/write_wakeup_threshold"
 #define LRNG_FILE "/proc/lrng_type"
 
 static void install_alarm(void);
@@ -543,7 +544,7 @@ static size_t gather_entropy(struct kernel_rng *rng, int init)
 	return ret;
 }
 
-static int read_entropy_avail(int fd)
+static int read_entropy_value(int fd)
 {
 	ssize_t data = 0;
 	char buf[5];
@@ -553,18 +554,18 @@ static int read_entropy_avail(int fd)
 	lseek(fd, 0, SEEK_SET);
 
 	if (0 > data) {
-		dolog(LOG_WARN, "Error reading data from entropy_avail: %s",
+		dolog(LOG_WARN, "Error reading data from entropy fd: %s",
 		      strerror(errno));
 		return 0;
 	}
 	if (0 == data) {
-		dolog(LOG_WARN, "Could not read data from entropy_avail");
+		dolog(LOG_WARN, "Could not read data from entropy fd");
 		return 0;
 	}
 
 	entropy = atoi(buf);
 	if (0 > entropy || 4096 < entropy) {
-		dolog(LOG_WARN, "Entropy read from entropy_avail (%d) is outsize of range", entropy);
+		dolog(LOG_WARN, "Entropy read from entropy fd (%d) is outsize of range", entropy);
 		return 0;
 	}
 
@@ -581,7 +582,7 @@ static int read_entropy_avail(int fd)
  */
 static void sig_entropy_avail(int sig)
 {
-	int entropy = 0;
+	int entropy = 0, thresh = 0;
 	size_t written = 0;
 	static unsigned int force_reseed = FORCE_RESEED_WAKEUPS;
 
@@ -597,11 +598,12 @@ static void sig_entropy_avail(int sig)
 		goto out;
 	}
 
-	entropy = read_entropy_avail(Entropy_avail_fd);
+	entropy = read_entropy_value(Entropy_avail_fd);
+	thresh = read_entropy_value(Entropy_thresh_fd);
 
-	if (0 == entropy)
+	if (0 == entropy || 0 == thresh)
 		goto out;
-	if (ENTROPYTHRESH < entropy) {
+	if (entropy < thresh) {
 		dolog(LOG_DEBUG, "Sufficient entropy %d available", entropy);
 		goto out;
 	}
@@ -706,7 +708,10 @@ static void dealloc(void)
 		close(Entropy_avail_fd);
 		Entropy_avail_fd = -1;
 	}
-
+	if (-1 != Entropy_thresh_fd) {
+		close(Entropy_thresh_fd);
+		Entropy_thresh_fd = -1;
+	}
 	if (-1 != Pidfile_fd) {
 		close(Pidfile_fd);
 		Pidfile_fd = -1;
@@ -766,6 +771,16 @@ static int alloc(void)
 		dealloc();
 		return -errsv;
 	}
+
+	Entropy_thresh_fd = open(ENTROPYTHRESH, O_RDONLY);
+	if (-1 == Entropy_thresh_fd) {
+		int errsv = errno;
+
+		dolog(LOG_ERR, "Open of %s failed: %s", ENTROPYTHRESH, strerror(errno));
+		dealloc();
+		return -errsv;
+	}
+
 
 	written = gather_entropy(&Random, 1);
 	dolog(LOG_VERBOSE, "%lu bytes written to /dev/random", written);
