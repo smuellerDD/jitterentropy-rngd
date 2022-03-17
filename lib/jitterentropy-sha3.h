@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2021, Stephan Mueller <smueller@chronox.de>
+ * Copyright (C) 2021 - 2022, Stephan Mueller <smueller@chronox.de>
  *
  * License: see LICENSE file in root directory
  *
@@ -47,6 +47,8 @@ struct sha_ctx {
 void sha3_256_init(struct sha_ctx *ctx);
 void sha3_update(struct sha_ctx *ctx, const uint8_t *in, size_t inlen);
 void sha3_final(struct sha_ctx *ctx, uint8_t *digest);
+int sha3_alloc(void **hash_state);
+void sha3_dealloc(void *hash_state);
 int sha3_tester(void);
 
 #ifdef __cplusplus

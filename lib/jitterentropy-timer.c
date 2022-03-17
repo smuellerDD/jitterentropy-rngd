@@ -1,6 +1,6 @@
 /* Jitter RNG: Internal timer implementation
  *
- * Copyright (C) 2021, Stephan Mueller <smueller@chronox.de>
+ * Copyright (C) 2021 - 2022, Stephan Mueller <smueller@chronox.de>
  *
  * License: see LICENSE file in root directory
  *
@@ -22,7 +22,6 @@
 #include "jitterentropy-timer.h"
 
 #ifdef JENT_CONF_ENABLE_INTERNAL_TIMER
-
 /***************************************************************************
  * Thread handler
  ***************************************************************************/

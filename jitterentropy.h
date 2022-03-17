@@ -1,7 +1,7 @@
 /*
  * Non-physical true random number generator based on timing jitter.
  *
- * Copyright Stephan Mueller <smueller@chronox.de>, 2014 - 2021
+ * Copyright Stephan Mueller <smueller@chronox.de>, 2014 - 2022
  *
  * License
  * =======
@@ -42,6 +42,10 @@
 #ifndef _JITTERENTROPY_H
 #define _JITTERENTROPY_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /***************************************************************************
  * Jitter RNG Configuration Section
  *
@@ -49,7 +53,7 @@
  ***************************************************************************/
 
 /*
- * Enable timer-less timer support
+ * Enable timer-less timer support with JENT_CONF_ENABLE_INTERNAL_TIMER
  *
  * In case the hardware is identified to not provide a high-resolution time
  * stamp, this option enables a built-in high-resolution time stamp mechanism.
@@ -59,7 +63,6 @@
  * must offer POSIX threads. If this option is disabled, no linking
  * with the POSIX threads library is needed.
  */
-#define JENT_CONF_ENABLE_INTERNAL_TIMER
 
 /*
  * Disable the loop shuffle operation
@@ -95,7 +98,11 @@
  * Jitter RNG State Definition Section
  ***************************************************************************/
 
+#if defined(_MSC_VER)
+#include "arch/jitterentropy-base-windows.h"
+#else
 #include "jitterentropy-base-user.h"
+#endif
 
 #define SHA3_256_SIZE_DIGEST_BITS	256
 #define SHA3_256_SIZE_DIGEST		(SHA3_256_SIZE_DIGEST_BITS >> 3)
@@ -166,7 +173,7 @@ struct rand_data
 	 * of the RNG are marked as SENSITIVE. A user must not
 	 * access that information while the RNG executes its loops to
 	 * calculate the next random value. */
-	uint8_t data[SHA3_256_SIZE_DIGEST]; /* SENSITIVE Actual random number */
+	void *hash_state;		/* SENSITIVE hash state entropy pool */
 	uint64_t prev_time;		/* SENSITIVE Previous time stamp */
 #define DATA_SIZE_BITS (SHA3_256_SIZE_DIGEST_BITS)
 
@@ -355,7 +362,11 @@ struct rand_data
 #ifdef JENT_PRIVATE_COMPILE
 # define JENT_PRIVATE_STATIC static
 #else /* JENT_PRIVATE_COMPILE */
-# define JENT_PRIVATE_STATIC __attribute__((visibility("default")))
+#if defined(_MSC_VER)
+#define JENT_PRIVATE_STATIC __declspec(dllexport)
+#else
+#define JENT_PRIVATE_STATIC __attribute__((visibility("default")))
+#endif
 #endif
 
 /* Number of low bits of the time value that we want to consider */
@@ -378,6 +389,15 @@ int jent_entropy_init(void);
 JENT_PRIVATE_STATIC
 int jent_entropy_init_ex(unsigned int osr, unsigned int flags);
 
+/*
+ * Set a callback to run on health failure in FIPS mode.
+ * This function will take an action determined by the caller.
+ */
+typedef void (*jent_fips_failure_cb)(struct rand_data *ec,
+				     unsigned int health_failure);
+JENT_PRIVATE_STATIC
+int jent_set_fips_failure_callback(jent_fips_failure_cb cb);
+
 /* return version number of core library */
 JENT_PRIVATE_STATIC
 unsigned int jent_version(void);
@@ -390,12 +410,12 @@ int jent_entropy_switch_notime_impl(struct jent_notime_thread *new_thread);
 
 /* -- BEGIN timer-less threading support functions to prevent code dupes -- */
 
+#ifdef JENT_CONF_ENABLE_INTERNAL_TIMER
+
 struct jent_notime_ctx {
 	pthread_attr_t notime_pthread_attr;	/* pthreads library */
 	pthread_t notime_thread_id;		/* pthreads thread ID */
 };
-
-#ifdef JENT_CONF_ENABLE_INTERNAL_TIMER
 
 JENT_PRIVATE_STATIC
 int jent_notime_init(void **ctx);
@@ -443,5 +463,9 @@ uint64_t jent_lfsr_var_stat(struct rand_data *ec, unsigned int min);
 #endif /* CONFIG_CRYPTO_CPU_JITTERENTROPY_STAT */
 
 /* -- END of statistical test function -- */
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _JITTERENTROPY_H */

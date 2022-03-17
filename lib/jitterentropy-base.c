@@ -1,7 +1,7 @@
 /*
  * Non-physical true random number generator based on timing jitter.
  *
- * Copyright Stephan Mueller <smueller@chronox.de>, 2014 - 2021
+ * Copyright Stephan Mueller <smueller@chronox.de>, 2014 - 2022
  *
  * Design
  * ======
@@ -42,10 +42,10 @@
 		      * require consumer to be updated (as long as this number
 		      * is zero, the API is not considered stable and can
 		      * change without a bump of the major version) */
-#define MINVERSION 3 /* API compatible, ABI may change, functional
+#define MINVERSION 4 /* API compatible, ABI may change, functional
 		      * enhancements only, consumer can be left unchanged if
 		      * enhancements are not considered */
-#define PATCHLEVEL 1 /* API / ABI compatible, no functional changes, no
+#define PATCHLEVEL 0 /* API / ABI compatible, no functional changes, no
 		      * enhancements, bug fixes only */
 
 /***************************************************************************
@@ -200,29 +200,38 @@ ssize_t jent_read_entropy(struct rand_data *ec, char *data, size_t len)
 			tocopy = (DATA_SIZE_BITS / 8);
 		else
 			tocopy = len;
-		memcpy(p, &ec->data, tocopy);
+
+		jent_read_random_block(ec, p, tocopy);
 
 		len -= tocopy;
 		p += tocopy;
 	}
 
 	/*
-	 * To be on the safe side, we generate one more round of entropy
-	 * which we do not give out to the caller. That round shall ensure
-	 * that in case the calling application crashes, memory dumps, pages
-	 * out, or due to the CPU Jitter RNG lingering in memory for long
-	 * time without being moved and an attacker cracks the application,
-	 * all he reads in the entropy pool is a value that is NEVER EVER
-	 * being used for anything. Thus, he does NOT see the previous value
-	 * that was returned to the caller for cryptographic purposes.
+	 * Enhanced backtracking support: At this point, the hash state
+	 * contains the digest of the previous Jitter RNG collection round
+	 * which is inserted there by jent_read_random_block with the SHA
+	 * update operation. At the current code location we completed
+	 * one request for a caller and we do not know how long it will
+	 * take until a new request is sent to us. To guarantee enhanced
+	 * backtracking resistance at this point (i.e. ensure that an attacker
+	 * cannot obtain information about prior random numbers we generated),
+	 * but still stirring the hash state with old data the Jitter RNG
+	 * obtains a new message digest from its state and re-inserts it.
+	 * After this operation, the Jitter RNG state is still stirred with
+	 * the old data, but an attacker who gets access to the memory after
+	 * this point cannot deduce the random numbers produced by the
+	 * Jitter RNG prior to this point.
 	 */
 	/*
-	 * If we use secured memory, do not use that precaution as the secure
-	 * memory protects the entropy pool. Moreover, note that using this
-	 * call reduces the speed of the RNG by up to half
+	 * If we use secured memory, where backtracking support may not be
+	 * needed because the state is protected in a different method,
+	 * it is permissible to drop this support. But strongly weigh the
+	 * pros and cons considering that the SHA3 operation is not that
+	 * expensive.
 	 */
 #ifndef CONFIG_CRYPTO_CPU_JITTERENTROPY_SECURE_MEMORY
-	jent_random_data(ec);
+	jent_read_random_block(ec, NULL, 0);
 #endif
 
 err:
@@ -431,13 +440,19 @@ static struct rand_data
 		entropy_collector->memaccessloops = JENT_MEMORY_ACCESSLOOPS;
 	}
 
+	if (sha3_alloc(&entropy_collector->hash_state))
+		goto err;
+
+	/* Initialize the hash state */
+	sha3_256_init(entropy_collector->hash_state);
+
 	/* verify and set the oversampling rate */
 	if (osr < JENT_MIN_OSR)
 		osr = JENT_MIN_OSR;
 	entropy_collector->osr = osr;
 	entropy_collector->flags = flags;
 
-	if (jent_fips_enabled() || (flags & JENT_FORCE_FIPS))
+	if ((flags & JENT_FORCE_FIPS) || jent_fips_enabled())
 		entropy_collector->fips_enabled = 1;
 
 	/* Initialize the APT */
@@ -511,6 +526,7 @@ JENT_PRIVATE_STATIC
 void jent_entropy_collector_free(struct rand_data *entropy_collector)
 {
 	if (entropy_collector != NULL) {
+		sha3_dealloc(entropy_collector->hash_state);
 		jent_notime_disable(entropy_collector);
 		if (entropy_collector->mem != NULL) {
 			jent_zfree(entropy_collector->mem,
@@ -664,6 +680,7 @@ static inline int jent_entropy_init_common_pre(void)
 	int ret;
 
 	jent_notime_block_switch();
+	jent_health_cb_block_switch();
 
 	if (sha3_tester())
 		return EHASH;
@@ -731,4 +748,10 @@ JENT_PRIVATE_STATIC
 int jent_entropy_switch_notime_impl(struct jent_notime_thread *new_thread)
 {
 	return jent_notime_switch(new_thread);
+}
+
+JENT_PRIVATE_STATIC
+int jent_set_fips_failure_callback(jent_fips_failure_cb cb)
+{
+	return jent_set_fips_failure_callback_internal(cb);
 }

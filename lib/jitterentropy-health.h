@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2021, Stephan Mueller <smueller@chronox.de>
+ * Copyright (C) 2021 - 2022, Stephan Mueller <smueller@chronox.de>
  *
  * License: see LICENSE file in root directory
  *
@@ -20,10 +20,15 @@
 #ifndef JITTERENTROPY_HEALTH_H
 #define JITTERENTROPY_HEALTH_H
 
+#include "jitterentropy.h"
+
 #ifdef __cplusplus
 extern "C"
 {
 #endif
+
+void jent_health_cb_block_switch(void);
+int jent_set_fips_failure_callback_internal(jent_fips_failure_cb cb);
 
 static inline uint64_t jent_delta(uint64_t prev, uint64_t next)
 {
