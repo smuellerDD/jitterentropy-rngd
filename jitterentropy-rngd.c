@@ -452,7 +452,16 @@ static size_t write_random_90B(struct kernel_rng *rng, char *buf, size_t len,
 
 static ssize_t read_jent(struct kernel_rng *rng, char *buf, size_t buflen)
 {
-	ssize_t ret = jent_read_entropy_safe(&rng->ec, buf, buflen);
+	ssize_t ret;
+
+	/*
+	 *jent_read_entropy_safe implies a changing H_submitter which is not
+	 * allowed in SP800-90B.
+	 */
+	if (force_sp80090b)
+		ret = jent_read_entropy(rng->ec, buf, buflen);
+	else
+		ret = jent_read_entropy_safe(&rng->ec, buf, buflen);
 
 	if (ret >= 0)
 		return ret;
