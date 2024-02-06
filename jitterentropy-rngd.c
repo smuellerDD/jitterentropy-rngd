@@ -361,11 +361,14 @@ static inline void memset_secure(void *s, int c, size_t n)
  * entropy handler functions
  *******************************************************************/
 
-static size_t write_random(struct kernel_rng *rng, char *buf, size_t len,
-			   size_t entropy_bytes, int force_reseed)
+static ssize_t write_random(struct kernel_rng *rng, char *buf, size_t len,
+			    size_t entropy_bytes, int force_reseed)
 {
-	size_t written = 0;
+	ssize_t written = 0;
 	int ret;
+
+	if (len > SSIZE_MAX)
+		return -EOVERFLOW;
 
 	 /* value is in bits */
 	rng->rpi->entropy_count = (entropy_bytes * 8);
@@ -373,9 +376,12 @@ static size_t write_random(struct kernel_rng *rng, char *buf, size_t len,
 	memcpy(rng->rpi->buf, buf, len);
 
 	ret = ioctl(rng->fd, RNDADDENTROPY, rng->rpi);
-	if (0 > ret)
-		dolog(LOG_WARN, "Error injecting entropy: %s", strerror(errno));
-	else {
+	if (0 > ret) {
+		int errsv = errno;
+
+		dolog(LOG_WARN, "Error injecting entropy: %s", strerror(errsv));
+		return -errsv;
+	} else {
 		dolog(LOG_DEBUG, "Injected %u bytes with an entropy count of %u bytes of entropy",
 		      len, entropy_bytes);
 		written = len;
@@ -424,16 +430,20 @@ static size_t write_random(struct kernel_rng *rng, char *buf, size_t len,
  * from the Jitter-RNG.
  */
 #define SHA1_FOLD_OUTPUT_SIZE	10
-static size_t write_random_90B(struct kernel_rng *rng, char *buf, size_t len,
-			       size_t entropy_bytes, int force_reseed)
+static ssize_t write_random_90B(struct kernel_rng *rng, char *buf, size_t len,
+				size_t entropy_bytes, int force_reseed)
 {
 	size_t written = 0, ptr;
 
 	if (!force_reseed)
 		return write_random(rng, buf, len, entropy_bytes, force_reseed);
 
+	if (len > SSIZE_MAX)
+		return -EOVERFLOW;
+
 	for (ptr = 0; ptr < len; ptr += SHA1_FOLD_OUTPUT_SIZE) {
 		size_t todo = len - ptr, ent;
+		ssize_t out;
 
 		if (todo > SHA1_FOLD_OUTPUT_SIZE)
 			todo = SHA1_FOLD_OUTPUT_SIZE;
@@ -443,8 +453,12 @@ static size_t write_random_90B(struct kernel_rng *rng, char *buf, size_t len,
 			ent = entropy_bytes;
 		entropy_bytes -= ent;
 
-		written += write_random(rng, buf + ptr, todo, ent,
-					force_reseed);
+		out = write_random(rng, buf + ptr, todo, ent, force_reseed);
+
+		if (out < 0)
+			return out;
+
+		written += out;
 	}
 
 	return written;
@@ -471,7 +485,7 @@ static ssize_t read_jent(struct kernel_rng *rng, char *buf, size_t buflen)
 	return -EFAULT;
 }
 
-static size_t gather_entropy(struct kernel_rng *rng, int init)
+static ssize_t gather_entropy(struct kernel_rng *rng, int init)
 {
 	sigset_t blocking_set, previous_set;
 #define ENTBLOCKSIZE	(ENTROPYBYTES * OVERSAMPLINGFACTOR)
@@ -485,8 +499,8 @@ static size_t gather_entropy(struct kernel_rng *rng, int init)
  */
 #define ENTBLOCKS	(4 + 2 + 1)
 	char buf[(ENTBLOCKSIZE * ENTBLOCKS)];
-	size_t buflen = ENTBLOCKSIZE;
-	size_t ret = 0;
+	ssize_t buflen = ENTBLOCKSIZE;
+	ssize_t ret = 0;
 
 	sigemptyset(&previous_set);
 	sigemptyset(&blocking_set);
@@ -541,7 +555,7 @@ static size_t gather_entropy(struct kernel_rng *rng, int init)
 				       buflen / OVERSAMPLINGFACTOR, 0);
 	}
 
-	if (buflen != ret) {
+	if (ret >= 0 && buflen != ret) {
 		dolog(LOG_WARN, "Injected %lu bytes into %s, expected %d",
 		      ret, rng->dev, buflen);
 		ret = 0;
@@ -584,6 +598,8 @@ static int read_entropy_value(int fd)
 /*******************************************************************
  * Signal handling functions
  *******************************************************************/
+static void dealloc(void);
+static int alloc(void);
 
 /*
  * Wakeup and check entropy_avail -- this covers the drain of entropy
@@ -592,7 +608,7 @@ static int read_entropy_value(int fd)
 static void sig_entropy_avail(int sig)
 {
 	int entropy = 0, thresh = 0;
-	size_t written = 0;
+	ssize_t written = 0;
 	static unsigned int force_reseed = FORCE_RESEED_WAKEUPS;
 
 	(void)sig;
@@ -602,8 +618,16 @@ static void sig_entropy_avail(int sig)
 	if (--force_reseed == 0) {
 		force_reseed = FORCE_RESEED_WAKEUPS;
 		dolog(LOG_DEBUG, "Force reseed", entropy);
-		written = gather_entropy(&Random, 0);
-		dolog(LOG_VERBOSE, "%lu bytes written to /dev/random", written);
+		do {
+			if (written < 0) {
+				dolog(LOG_DEBUG, "Re-initializing rngd\n");
+				dealloc();
+				if (alloc() < 0)
+					goto out;
+			}
+			written = gather_entropy(&Random, 0);
+		} while (written < 0);
+		dolog(LOG_VERBOSE, "%zd bytes written to /dev/random", written);
 		goto out;
 	}
 
@@ -612,13 +636,22 @@ static void sig_entropy_avail(int sig)
 
 	if (0 == entropy || 0 == thresh)
 		goto out;
-	if (entropy < thresh) {
+	if (entropy >= thresh) {
 		dolog(LOG_DEBUG, "Sufficient entropy %d available", entropy);
 		goto out;
 	}
-	dolog(LOG_DEBUG, "Insufficient entropy %d available", entropy);
-	written = gather_entropy(&Random, 0);
-	dolog(LOG_VERBOSE, "%lu bytes written to /dev/random", written);
+	dolog(LOG_DEBUG, "Insufficient entropy %d available (threshold %d)",
+	      entropy, thresh);
+	do {
+		if (written < 0) {
+			dolog(LOG_DEBUG, "Re-initializing rngd\n");
+			dealloc();
+			if (alloc() < 0)
+				goto out;
+		}
+		written = gather_entropy(&Random, 0);
+	} while (written < 0);
+	dolog(LOG_VERBOSE, "%zd bytes written to /dev/random", written);
 out:
 	install_alarm();
 	return;
@@ -650,7 +683,7 @@ static void select_fd(void)
 {
 	fd_set fds;
 	int ret = 0;
-	size_t written = 0;
+	ssize_t written = 0;
 
 	while (1) {
 		FD_ZERO(&fds);
@@ -663,8 +696,18 @@ static void select_fd(void)
 			dolog(LOG_ERR, "Select returned with error %s", strerror(errno));
 		if (0 <= ret) {
 			dolog(LOG_VERBOSE, "Wakeup call for select on /dev/random");
-			written = gather_entropy(&Random, 0);
-			dolog(LOG_VERBOSE, "%lu bytes written to /dev/random", written);
+			do {
+				if (written < 0) {
+					dolog(LOG_DEBUG,
+					      "Re-initializing rngd\n");
+					dealloc();
+					if (alloc() < 0)
+						continue;
+				}
+				written = gather_entropy(&Random, 0);
+			} while (written < 0);
+			dolog(LOG_VERBOSE, "%zd bytes written to /dev/random",
+			      written);
 		}
 	}
 }
