@@ -106,17 +106,21 @@ static unsigned int jent_osr = 1;
 #define ENTROPYBYTES 32
 #define OVERSAMPLINGFACTOR 2
 /*
- * After FORCE_RESEED_WAKEUPS, the installed alarm handler will unconditionally
- * trigger a reseed irrespective of the seed level. This ensures that new
- * seed is added after FORCE_RESEED_WAKEUPS * (alarm period defined in
- * install_alarm) == 120 * 5 == 600s.
+ * After (force reseed wakeups), the installed alarm handler will unconditionally
+ * trigger a reseed irrespective of the seed level in two phases. This ensures
+ * that new seed is added after every (force reseed wakeups) * (alarm period).
+ * PHASE1: 120(force reseed wakeups) * 5(alarm period) == 600s
+ * PHASE2: 12(force reseed wakeups) * 50(alarm period) == 600s
  */
-#define FORCE_RESEED_WAKEUPS	120
+#define FORCE_RESEED_WAKEUPS_PHASE1	120
+#define ALARM_PERIOD_PHASE1	5
+#define FORCE_RESEED_WAKEUPS_PHASE2	12
+#define ALARM_PERIOD_PHASE2	50
 #define ENTROPYAVAIL "/proc/sys/kernel/random/entropy_avail"
 #define ENTROPYTHRESH "/proc/sys/kernel/random/write_wakeup_threshold"
 #define LRNG_FILE "/proc/lrng_type"
 
-static void install_alarm(void);
+static void install_alarm(unsigned int secs);
 static void dealloc(void);
 static void dealloc_rng(struct kernel_rng *rng);
 
@@ -609,14 +613,16 @@ static void sig_entropy_avail(int sig)
 {
 	int entropy = 0, thresh = 0;
 	ssize_t written = 0;
-	static unsigned int force_reseed = FORCE_RESEED_WAKEUPS;
+	static unsigned int force_reseed = FORCE_RESEED_WAKEUPS_PHASE1;
+	static unsigned int alarm_period = ALARM_PERIOD_PHASE1;
 
 	(void)sig;
 
 	dolog(LOG_VERBOSE, "Wakeup call for alarm on %s", ENTROPYAVAIL);
 
 	if (--force_reseed == 0) {
-		force_reseed = FORCE_RESEED_WAKEUPS;
+		force_reseed = FORCE_RESEED_WAKEUPS_PHASE2;
+		alarm_period = ALARM_PERIOD_PHASE2;
 		dolog(LOG_DEBUG, "Force reseed", entropy);
 		do {
 			if (written < 0) {
@@ -653,7 +659,7 @@ static void sig_entropy_avail(int sig)
 	} while (written < 0);
 	dolog(LOG_VERBOSE, "%zd bytes written to /dev/random", written);
 out:
-	install_alarm();
+	install_alarm(alarm_period);
 	return;
 }
 
@@ -712,13 +718,13 @@ static void select_fd(void)
 	}
 }
 
-static void install_alarm(void)
+static void install_alarm(unsigned int secs)
 {
 	if (lrng_present())
 		return;
 	dolog(LOG_DEBUG, "Install alarm signal handler");
 	signal(SIGALRM, sig_entropy_avail);
-	alarm(5);
+	alarm(secs);
 }
 
 static void install_term(void)
@@ -928,7 +934,7 @@ int main(int argc, char *argv[])
 	if (0 == Verbosity)
 		daemonize();
 	install_term();
-	install_alarm();
+	install_alarm(ALARM_PERIOD_PHASE1);
 	select_fd();
 	/* NOTREACHED */
 	dealloc();
