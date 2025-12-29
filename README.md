@@ -38,18 +38,25 @@ any cryptographic daemons, like sshd or a web server, benefits from a seeded
 Docker
 ======
 
-Run using docker-compose:
+Run using `docker compose`:
 
-```
-docker-compose up -d
+```sh
+docker compose up -d
 ```
 
-Build and run manually:
+Manual steps:
 
+1. Build an image from the latest source code.
+```sh
+docker build -t smuellerDD/jitterentropy-rngd \
+    'https://github.com/smuellerDD/jitterentropy-rngd.git'
 ```
-docker build -t jitterentropy-rngd .
-docker run --cap-add=SYS_ADMIN --cap-drop=ALL --name=rngd --network=none \
-    --restart=always -d jitterentropy-rngd
+
+2. Create and run a container using the newly built image.
+```sh
+docker run -d --name=rngd --restart=always \
+    --cap-add=SYS_ADMIN --cap-drop=ALL \
+    --network=none smuellerDD/jitterentropy-rngd
 ```
 
 Version Numbers
