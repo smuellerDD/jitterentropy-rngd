@@ -48,7 +48,7 @@ Manual steps:
 
 1. Build an image from the latest source code.
 ```sh
-docker build -t smuellerDD/jitterentropy-rngd \
+docker build -t smuellerdd/jitterentropy-rngd \
     'https://github.com/smuellerDD/jitterentropy-rngd.git'
 ```
 
@@ -56,7 +56,7 @@ docker build -t smuellerDD/jitterentropy-rngd \
 ```sh
 docker run -d --name=rngd --restart=always \
     --cap-add=SYS_ADMIN --cap-drop=ALL \
-    --network=none smuellerDD/jitterentropy-rngd
+    --network=none smuellerdd/jitterentropy-rngd
 ```
 
 Version Numbers
