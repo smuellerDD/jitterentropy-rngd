@@ -3,6 +3,7 @@ FROM alpine
 RUN apk add --no-cache gcc libc-dev linux-headers make
 
 WORKDIR /source
+COPY lib/ lib/
 COPY *.c *.h Makefile ./
 
 RUN make
