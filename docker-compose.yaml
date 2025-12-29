@@ -1,9 +1,9 @@
-version: '2'
+name: jitterentropy
 
 services:
     rngd:
         build:
-            context: .
+            context: https://github.com/smuellerDD/jitterentropy-rngd.git
         cap_add:
             - SYS_ADMIN
         cap_drop:
