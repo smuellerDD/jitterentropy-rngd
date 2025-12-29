@@ -35,7 +35,7 @@ daemons during the user space start process. This shall guarantee that
 any cryptographic daemons, like sshd or a web server, benefits from a seeded
 /dev/random and /dev/urandom device at the time they start up.
 
-Docker
+Docker [![Docker CI](https://github.com/smuellerDD/jitterentropy-rngd/actions/workflows/docker-build-image.yml/badge.svg?event=push)](https://github.com/smuellerDD/jitterentropy-rngd/actions/workflows/docker-build-image.yml)
 ======
 
 Run using docker-compose:
