@@ -69,6 +69,7 @@
 
 static int Verbosity = 0;
 static int force_sp80090b = 0;
+static int status = 0;
 
 struct kernel_rng {
 	int fd;
@@ -247,6 +248,7 @@ static void parse_opts(int argc, char *argv[])
 			{"sp800-90b", 0, 0, 0},
 			{"flags", 1, 0, 0},
 			{"osr", 1, 0, 0},
+			{"status", 0, 0, 0},
 			{0, 0, 0, 0}
 		};
 		c = getopt_long(argc, argv, "svp:hf:o:", opts, &opt_index);
@@ -255,24 +257,36 @@ static void parse_opts(int argc, char *argv[])
 		switch (c) {
 		case 0:
 			switch (opt_index) {
+
+			/* verbose */
 			case 0:
 				Verbosity++;
 				break;
+
+			/* pid */
 			case 1:
 				Pidfile = optarg;
 				break;
+
+			/* help */
 			case 2:
 				usage();
 				break;
+
+			/* version */
 			case 3:
 				jentrng_versionstring(version, sizeof(version));
 				fprintf(stderr, "Version %s\n", version);
 				fprintf(stderr, "Version Jitterentropy Core %u\n", jent_version());
 				exit(0);
 				break;
+
+			/* sp800-90b */
 			case 4:
 				force_sp80090b = 1;
 				break;
+
+			/* flags */
 			case 5:
 			{
 				unsigned long val = strtoul(optarg, NULL, 10);
@@ -283,6 +297,8 @@ static void parse_opts(int argc, char *argv[])
 
 				break;
 			}
+
+			/* osr */
 			case 6:
 			{
 				unsigned long val = strtoul(optarg, NULL, 10);
@@ -293,6 +309,12 @@ static void parse_opts(int argc, char *argv[])
 
 				break;
 			}
+
+			/* status */
+			case 7:
+				status = 1;
+				break;
+
 			default:
 				usage();
 			}
@@ -836,6 +858,17 @@ static int alloc_rng(struct kernel_rng *rng)
 		return -EAGAIN;
 	}
 
+	if (status) {
+		char buf[2500];
+		int ret = jent_status(rng->ec, buf, sizeof(buf));
+
+		if (ret)
+			return ret;
+
+		fprintf(stderr, "%s\n", buf);
+		return -EAGAIN;
+	}
+
 	rng->rpi = malloc((sizeof(struct rand_pool_info) +
 			  (ENTROPYBYTES * OVERSAMPLINGFACTOR * sizeof(char))));
 	if (!rng->rpi) {
@@ -888,7 +921,6 @@ static int alloc(void)
 		dealloc();
 		return -errsv;
 	}
-
 
 	written = gather_entropy(&Random, 1);
 	dolog(LOG_VERBOSE, "%lu bytes written to /dev/random", written);
@@ -979,7 +1011,7 @@ int main(int argc, char *argv[])
 
 	ret = alloc();
 	if (ret)
-		return -ret;
+		goto out;
 
 	if (0 == Verbosity)
 		daemonize();
@@ -987,6 +1019,8 @@ int main(int argc, char *argv[])
 	install_alarm(ALARM_PERIOD_PHASE1);
 	select_fd();
 	/* NOTREACHED */
+
+out:
 	dealloc();
-	return 0;
+	return -ret;
 }
