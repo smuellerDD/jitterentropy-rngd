@@ -228,6 +228,8 @@ static void usage(void)
 	fprintf(stderr, "\t-s --sp800-90b\tForce SP800-90B compliance\n");
 	fprintf(stderr, "\t-f --flags\tInteger with flags used to allocate Jitter RNG\n");
 	fprintf(stderr, "\t-o --osr\tInteger with OSR used to allocate Jitter RNG\n");
+	fprintf(stderr, "\t   --status\tStatus information of the Jitter RNG - invoke with\n");
+	fprintf(stderr, "\t           \tsame flags as used for runtime\n");
 	fprintf(stderr, "\nLRNG presence %sdetected\n",
 		lrng_present() ? "" : "not ");
 	exit(1);
