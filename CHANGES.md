@@ -1,3 +1,8 @@
+1.3.0:
+ * enhancement: use Jitter RNG library 3.7.0
+ * enhancement: inject data into Linux RNG where the Linux RNG operates as
+   AIS 20/31 DRT.1 tree
+
 1.2.8:
  * enhancement: use Jitter RNG library 3.4.1
 

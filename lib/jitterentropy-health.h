@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2021 - 2022, Stephan Mueller <smueller@chronox.de>
+ * Copyright (C) 2021 - 2025, Stephan Mueller <smueller@chronox.de>
  *
  * License: see LICENSE file in root directory
  *
@@ -20,7 +20,7 @@
 #ifndef JITTERENTROPY_HEALTH_H
 #define JITTERENTROPY_HEALTH_H
 
-#include "jitterentropy.h"
+#include "jitterentropy-internal.h"
 
 #ifdef __cplusplus
 extern "C"
@@ -32,22 +32,59 @@ int jent_set_fips_failure_callback_internal(jent_fips_failure_cb cb);
 
 static inline uint64_t jent_delta(uint64_t prev, uint64_t next)
 {
+	/*
+	 * Return the delta between two values. If the values are monotonic
+	 * increasing counters which can wrap, this caluculation implicitly
+	 * returns the absolute value of the delta all the time.
+	 */
 	return (next - prev);
 }
 
-#ifdef JENT_HEALTH_LAG_PREDICTOR
-void jent_lag_init(struct rand_data *ec, unsigned int osr);
-#else /* JENT_HEALTH_LAG_PREDICTOR */
-static inline void jent_lag_init(struct rand_data *ec, unsigned int osr)
+#if 0
+static inline uint64_t jent_delta_abs(uint64_t prev, uint64_t next)
 {
-	(void)ec;
-	(void)osr;
+	/*
+	 * Return the absolute value of the delta when the values are not a
+	 * monotonic counter that may wrap.
+	 */
+	return (next > prev) ? (next - prev) : (prev - next);
 }
-#endif /* JENT_HEALTH_LAG_PREDICTOR */
+#endif
 
-void jent_apt_init(struct rand_data *ec, unsigned int osr);
+
+/*
+* The cutoff value is based on the following consideration:
+* alpha = 2^-30 or 2^-60 as recommended in SP800-90B.
+* In addition, we require an entropy value H of 1/osr as this is the minimum
+* entropy required to provide full entropy. Note, we collect
+* (DATA_SIZE_BITS + ENTROPY_SAFETY_FACTOR)*osr deltas for inserting them into
+* the entropy pool which should then have (close to) DATA_SIZE_BITS bits of
+* entropy in the conditioned output.
+*
+* Note, ec->rct_count (which equals to value B in the pseudo code of SP800-90B
+* section 4.4.1) starts with zero (see jent_health_init(), jent_rct_insert()).
+* Hence we need to subtract one from the cutoff value as calculated following
+* SP800-90B. Thus C = ceil(-log_2(alpha)/H) = 30*osr or 60*osr.
+*/
+/* RCT: Intermittent cutoff threshold for alpha = 2**-30 */
+#define JENT_HEALTH_RCT_INTERMITTENT_CUTOFF(x) ((x) * 30)
+/* RCT: permanent cutoff threshold for alpha = 2**-60 */
+#define JENT_HEALTH_RCT_PERMANENT_CUTOFF(x) ((x) * 60)
+
+void jent_apt_reinit(struct rand_data *ec,
+		     uint64_t current_delta,
+		     unsigned int apt_count,
+		     unsigned int apt_observations);
 unsigned int jent_stuck(struct rand_data *ec, uint64_t current_delta);
 unsigned int jent_health_failure(struct rand_data *ec);
+
+enum jent_health_init_type {
+	jent_health_init_type_common,
+	jent_health_init_type_ntg1_startup,
+	jent_health_init_type_ntg1_runtime,
+};
+void jent_health_init(struct rand_data *ec,
+		      enum jent_health_init_type inittype);
 
 #ifdef __cplusplus
 }

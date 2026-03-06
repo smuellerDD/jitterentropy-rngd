@@ -1,6 +1,6 @@
 /* Jitter RNG: Internal timer implementation
  *
- * Copyright (C) 2021 - 2022, Stephan Mueller <smueller@chronox.de>
+ * Copyright (C) 2021 - 2025, Stephan Mueller <smueller@chronox.de>
  *
  * License: see LICENSE file in root directory
  *
@@ -21,7 +21,22 @@
 #include "jitterentropy-base.h"
 #include "jitterentropy-timer.h"
 
+/* Timer-less entropy source */
 #ifdef JENT_CONF_ENABLE_INTERNAL_TIMER
+
+#ifdef JENT_PTHREAD
+#include <pthread.h>
+struct jent_notime_ctx {
+	pthread_attr_t notime_pthread_attr;     /* pthreads library */
+	pthread_t notime_thread_id;             /* pthreads thread ID */
+};
+#else
+#include <threads.h>
+struct jent_notime_ctx {
+	thrd_t notime_thread_id;                /* thread ID */
+};
+#endif
+
 /***************************************************************************
  * Thread handler
  ***************************************************************************/
@@ -37,7 +52,7 @@ int jent_notime_init(void **ctx)
 
 	/* We need at least two CPUs to enable the timer thread */
 	if (ncpu < 2)
-		return -EOPNOTSUPP;
+		return -ENOENT;
 
 	thread_ctx = calloc(1, sizeof(struct jent_notime_ctx));
 	if (!thread_ctx)
@@ -57,30 +72,65 @@ void jent_notime_fini(void *ctx)
 		free(thread_ctx);
 }
 
+#else /* JENT_CONF_ENABLE_INTERNAL_TIMER */
+
+int jent_notime_init(void **ctx) { (void)ctx; return 0; }
+void jent_notime_fini(void *ctx) { (void)ctx; }
+
+#endif /* JENT_CONF_ENABLE_INTERNAL_TIMER */
+
+#ifdef JENT_CONF_ENABLE_INTERNAL_TIMER
+
 static int jent_notime_start(void *ctx,
-			     void *(*start_routine) (void *), void *arg)
+#ifdef JENT_PTHREAD
+			    void *(*start_routine) (void *),
+#else
+			    int (*start_routine) (void *),
+#endif
+			    void *arg)
 {
 	struct jent_notime_ctx *thread_ctx = (struct jent_notime_ctx *)ctx;
+#ifdef JENT_PTHREAD
 	int ret;
+#endif
 
 	if (!thread_ctx)
 		return -EINVAL;
 
+#ifdef JENT_PTHREAD
 	ret = -pthread_attr_init(&thread_ctx->notime_pthread_attr);
 	if (ret)
 		return ret;
-
 	return -pthread_create(&thread_ctx->notime_thread_id,
 			       &thread_ctx->notime_pthread_attr,
 			       start_routine, arg);
+#else
+	switch (thrd_create(&thread_ctx->notime_thread_id, start_routine, arg)) {
+	case thrd_success:
+		return 0;
+	case thrd_nomem:
+		return -ENOMEM;
+	case thrd_timedout:
+		return -ETIMEDOUT;
+	case thrd_busy:
+		return -EBUSY;
+	case thrd_error:
+	default:
+		return -EINVAL;
+	}
+#endif
 }
 
 static void jent_notime_stop(void *ctx)
 {
 	struct jent_notime_ctx *thread_ctx = (struct jent_notime_ctx *)ctx;
 
+#ifdef JENT_PTHREAD
 	pthread_join(thread_ctx->notime_thread_id, NULL);
 	pthread_attr_destroy(&thread_ctx->notime_pthread_attr);
+#else
+	thrd_join(thread_ctx->notime_thread_id, NULL);
+#endif
 }
 
 static struct jent_notime_thread jent_notime_thread_builtin = {
@@ -115,7 +165,11 @@ static struct jent_notime_thread *notime_thread = &jent_notime_thread_builtin;
  * counter function. It conceptually acts as the low resolution
  * samples timer from a ring oscillator.
  */
+#ifdef JENT_PTHREAD
 static void *jent_notime_sample_timer(void *arg)
+#else
+static int jent_notime_sample_timer(void *arg)
+#endif
 {
 	struct rand_data *ec = (struct rand_data *)arg;
 
@@ -123,12 +177,17 @@ static void *jent_notime_sample_timer(void *arg)
 
 	while (1) {
 		if (ec->notime_interrupt)
-			return NULL;
+			goto out;
 
 		ec->notime_timer++;
 	}
 
+out:
+#ifdef JENT_PTHREAD
 	return NULL;
+#else
+	return 0;
+#endif
 }
 
 /*

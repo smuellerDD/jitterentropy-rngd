@@ -1,7 +1,7 @@
 /*
  * Non-physical true random number generator based on timing jitter.
  *
- * Copyright Stephan Mueller <smueller@chronox.de>, 2013 - 2022
+ * Copyright Stephan Mueller <smueller@chronox.de>, 2013 - 2025
  *
  * License
  * =======
@@ -49,35 +49,28 @@
  * Compilation for OpenSSL    #define OPENSSL
  */
 
+#include <sys/types.h>
+#include <sys/stat.h>
+
 #include <limits.h>
 #include <time.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/types.h>
 
-#include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
 #include <sched.h>
 
-/* Timer-less entropy source */
-#ifdef JENT_CONF_ENABLE_INTERNAL_TIMER
-#include <pthread.h>
-#endif /* JENT_CONF_ENABLE_INTERNAL_TIMER */
-
 #ifdef LIBGCRYPT
-#include <config.h>
-#include "g10lib.h"
+#include <gcrypt.h>
 #endif
 
 #ifdef OPENSSL
 #include <openssl/crypto.h>
-#ifdef OPENSSL_FIPS
-#include <openssl/fips.h>
-#endif
+#include <openssl/evp.h>
 #endif
 
 #if defined(AWSLC)
@@ -92,6 +85,15 @@
 #include <unistd.h>
 #endif
 
+#ifdef __APPLE__
+#include <sys/sysctl.h>
+#endif
+
+/* Override this, if you want to allocate more than 2 MB of secure memory */
+#ifndef JENT_SECURE_MEMORY_SIZE_MAX
+#define JENT_SECURE_MEMORY_SIZE_MAX 2097152
+#endif
+
 #if (__x86_64__) || (__i386__)
 /* Support rdtsc read on 64-bit and 32-bit x86 architectures */
 
@@ -101,7 +103,7 @@
 # define EAX_EDX_VAL(val, low, high)     ((low) | (high) << 32)
 # define EAX_EDX_RET(val, low, high)     "=a" (low), "=d" (high)
 #elif __i386__
-# define DECLARE_ARGS(val, low, high)    unsigned long val
+# define DECLARE_ARGS(val, low, high)    unsigned long long val
 # define EAX_EDX_VAL(val, low, high)     val
 # define EAX_EDX_RET(val, low, high)     "=A" (val)
 #endif
@@ -109,19 +111,38 @@
 static inline void jent_get_nstime(uint64_t *out)
 {
 	DECLARE_ARGS(val, low, high);
-	asm volatile("rdtsc" : EAX_EDX_RET(val, low, high));
+#ifdef __sun__
+	__asm("rdtsc" : EAX_EDX_RET(val, low, high));
+#else
+	__asm__ __volatile__("rdtsc" : EAX_EDX_RET(val, low, high));
+#endif
 	*out = EAX_EDX_VAL(val, low, high);
 }
 
 #elif defined(__aarch64__)
 
+#ifndef AARCH64_NSTIME_REGISTER
+#define AARCH64_NSTIME_REGISTER "cntvct_el0"
+#endif
+
 static inline void jent_get_nstime(uint64_t *out)
 {
         uint64_t ctr_val;
+#if !defined(__MACH__)
         /*
-         * Use the system counter for aarch64 (64 bit ARM).
+         * Use the system counter for aarch64 (64 bit ARM)...
          */
-        asm volatile("mrs %0, cntvct_el0" : "=r" (ctr_val));
+        __asm__ __volatile__("mrs %0, " AARCH64_NSTIME_REGISTER : "=r" (ctr_val));
+#else
+        /*
+         * Except on modern Apple platforms. Especially on M1 generation Arm64
+         * CPUs, the system counter is too coarse. Instead, use
+         * clock_gettime_nsec_np(CLOCK_UPTIME_RAW), that is equivalent to
+         * march_absolute_time(), but scaled to nanoseconds. See e.g.
+         * https://www.manpagez.com/man/3/clock_gettime_nsec_np/.
+         */
+        ctr_val = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+#endif
         *out = ctr_val;
 }
 
@@ -129,16 +150,57 @@ static inline void jent_get_nstime(uint64_t *out)
 
 static inline void jent_get_nstime(uint64_t *out)
 {
-	uint64_t clk;
+	/*
+	 * This is MVS+STCK code! Enable it with -S in the compiler.
+	 *
+	 * uint64_t clk;
+	 * __asm__ __volatile__("stck %0" : "=m" (clk) : : "cc");
+	 * *out = (uint64_t)(clk);
+	 */
 
-	/* this is MVS code! enable with -S in the compiler */
-	/*__asm__ volatile("stck %0" : "=m" (clk) : : "cc"); */
-	/* this is gcc */
-	asm volatile("stcke %0" : "=Q" (clk) : : "cc");
-	*out = (uint64_t)(clk);
+	/*
+	 * This is GCC+STCKE code. STCKE command and data format:
+	 * z/Architecture - Principles of Operation
+	 * http://publibz.boulder.ibm.com/epubs/pdf/dz9zr007.pdf
+	 *
+	 * The current value of bits 0-103 of the TOD clock is stored in bytes
+	 * 1-13 of the sixteen-byte output:
+	 *
+	 * bits 0-7: zeros (reserved for future extention)
+	 * bits 8-111: TOD Clock value
+	 * bits 112-127: Programmable Field
+	 *
+	 * Output bit 59 (TOD-Clock bit 51) effectively increments every
+	 * microsecond. Bits 60 to 111 of STCKE output are fractions of
+	 * a miscrosecond: bit 59 is 1.0us, bit 60 is .5us, bit 61 is .25us,
+	 * bit 62 is .125us, bit 63 is 62.5ns, etc.
+	 *
+	 * Some of these bits can be implemented, some not. 64 bits of
+	 * the TOD clock are implemented usually nowadays, these are
+	 * bits 8-71 of the output.
+	 *
+	 * The stepping value of TOD-clock bit position 63, if implemented,
+	 * is 2^-12 microseconds, or approximately 244 picoseconds. This value
+	 * is called a clock unit.
+	 */
+
+	uint8_t clk[16];
+
+	__asm__ __volatile__("stcke %0" : "=Q" (clk) : : "cc");
+
+	/* s390x is big-endian, so just perfom a byte-by-byte copy */
+	*out = *(uint64_t *)(clk + 1);
 }
 
 #elif defined(__powerpc)
+/*
+ * Uncomment this for newer PPC CPUs
+ * Newer PPC CPUs do not support mftbu/mftb
+ * these instructions were obsoleted and replaced by
+ * mfspr.  special processor registers 268 and 269 are the
+ * ones we want.
+ */
+ /* #define POWER_PC_USE_NEW_INSTRUCTIONS */
 
 /* taken from http://www.ecrypt.eu.org/ebats/cpucycles.html */
 
@@ -148,10 +210,17 @@ static inline void jent_get_nstime(uint64_t *out)
 	unsigned long low;
 	unsigned long newhigh;
 	uint64_t result;
-        asm volatile(
+#ifdef POWER_PC_USE_NEW_INSTRUCTIONS /* Newer PPC CPUs do not support mftbu/mftb */
+    __asm__ __volatile__(
+        "Lcpucycles:mfspr %0, 269;mfspr %1, 268;mfspr %2, 269;cmpw %0,%2;bne Lcpucycles"
+		: "=r" (high), "=r" (low), "=r" (newhigh)
+		);
+#else
+    __asm__ __volatile__(
 		"Lcpucycles:mftbu %0;mftb %1;mftbu %2;cmpw %0,%2;bne Lcpucycles"
 		: "=r" (high), "=r" (low), "=r" (newhigh)
 		);
+#endif
 	result = high;
 	result <<= 32;
 	result |= low;
@@ -172,10 +241,8 @@ static inline void jent_get_nstime(uint64_t *out)
 	 */
 	uint64_t tmp = 0;
 	timebasestruct_t aixtime;
-	read_real_time(&aixtime, TIMEBASE_SZ);
-	tmp = aixtime.tb_high;
-	tmp = tmp << 32;
-	tmp = tmp | aixtime.tb_low;
+	tmp = aixtime.tb_high * 1000000000UL;
+	tmp += aixtime.tb_low;
 	*out = tmp;
 # else /* __MACH__ */
 	/* we could use CLOCK_MONOTONIC(_RAW), but with CLOCK_REALTIME
@@ -197,17 +264,52 @@ static inline void jent_get_nstime(uint64_t *out)
 
 static inline void *jent_zalloc(size_t len)
 {
+	#define JENT_BUILD_BUG_ON(condition) ((void)sizeof(char[1 - 2*!!(condition)]))
+	#define JENT_IS_POWER_OF_2(n) (JENT_BUILD_BUG_ON((n & (n - 1)) != 0))
+
 	void *tmp = NULL;
 #ifdef LIBGCRYPT
+	/* Set the maximum usable locked memory to 2 MiB at fist call.
+	 *
+	 * You may have to adapt or delete this, if you
+	 * also use libgcrypt at other places in your software!
+	 */
+	if (!gcry_control (GCRYCTL_INITIALIZATION_FINISHED_P)) {
+		gcry_control(GCRYCTL_INIT_SECMEM, JENT_SECURE_MEMORY_SIZE_MAX, 0);
+		gcry_control(GCRYCTL_INITIALIZATION_FINISHED, 0);
+	}
 	/* When using the libgcrypt secure memory mechanism, all precautions
 	 * are taken to protect our state. If the user disables secmem during
 	 * runtime, it is his decision and we thus try not to overrule his
 	 * decision for less memory protection. */
 #define CONFIG_CRYPTO_CPU_JITTERENTROPY_SECURE_MEMORY
 	tmp = gcry_xmalloc_secure(len);
-#elif defined(OPENSSL) || defined(AWSLC)
-	/* Does this allocation implies secure memory use? */
+#elif defined(AWSLC)
 	tmp = OPENSSL_malloc(len);
+#elif defined(OPENSSL)
+	/* We only call secure malloc initialization here,
+	 * if not already done. The 2 MiB max. reserved here
+	 * are sufficient for jitterentropy but probably
+	 * too small for a whole application doing crypto
+	 * operations with OpenSSL.
+	 *
+	 * Both min and max value must be power of 2.
+	 * min must be smaller than max.
+	 *
+	 * May preallocate more before making the first
+	 * call into jitterentropy!*/
+	JENT_IS_POWER_OF_2(JENT_SECURE_MEMORY_SIZE_MAX);
+	if (CRYPTO_secure_malloc_initialized() ||
+	    CRYPTO_secure_malloc_init(JENT_SECURE_MEMORY_SIZE_MAX, 32)) {
+		tmp = OPENSSL_secure_malloc(len);
+	}
+#define CONFIG_CRYPTO_CPU_JITTERENTROPY_SECURE_MEMORY
+	/* If secure memory was not available, OpenSSL
+	 * falls back to "normal" memory. So double check. */
+	if (tmp && !CRYPTO_secure_allocated(tmp)) {
+		OPENSSL_secure_free(tmp);
+		tmp = NULL;
+	}
 #else
 	/* we have no secure memory allocation! Hence
 	 * we do not set CONFIG_CRYPTO_CPU_JITTERENTROPY_SECURE_MEMORY */
@@ -216,6 +318,9 @@ static inline void *jent_zalloc(size_t len)
 	if(NULL != tmp)
 		memset(tmp, 0, len);
 	return tmp;
+
+#undef JENT_IS_POWER_OF_2
+#undef JENT_BUILD_BUG_ON
 }
 
 static inline void jent_memset_secure(void *s, size_t n)
@@ -231,15 +336,17 @@ static inline void jent_memset_secure(void *s, size_t n)
 static inline void jent_zfree(void *ptr, unsigned int len)
 {
 #ifdef LIBGCRYPT
-	memset(ptr, 0, len);
+	/* gcry_free automatically wipes memory allocated with
+	 * gcry_(x)malloc_secure */
+	(void) len;
 	gcry_free(ptr);
 #elif defined(AWSLC)
-    /* AWS-LC stores the length of allocated memory internally and automatically wipes it in OPENSSL_free */
+	/* AWS-LC stores the length of allocated memory internally and automatically wipes it in OPENSSL_free */
 	(void) len;
 	OPENSSL_free(ptr);
 #elif defined(OPENSSL)
 	OPENSSL_cleanse(ptr, len);
-	OPENSSL_free(ptr);
+	OPENSSL_secure_free(ptr);
 #else
 	jent_memset_secure(ptr, len);
 	free(ptr);
@@ -249,15 +356,11 @@ static inline void jent_zfree(void *ptr, unsigned int len)
 static inline int jent_fips_enabled(void)
 {
 #ifdef LIBGCRYPT
-	return fips_mode();
+	return gcry_fips_mode_active();
 #elif defined(AWSLC)
 	return FIPS_mode();
 #elif defined(OPENSSL)
-#ifdef OPENSSL_FIPS
-	return FIPS_mode();
-#else
-	return 0;
-#endif
+	return EVP_default_properties_is_fips_enabled(NULL);
 #else
 #define FIPS_MODE_SWITCH_FILE "/proc/sys/crypto/fips_enabled"
 	char buf[2] = "0";
@@ -276,7 +379,7 @@ static inline int jent_fips_enabled(void)
 
 static inline long jent_ncpu(void)
 {
-#ifdef _POSIX_SOURCE
+#if defined(_POSIX_SOURCE) || defined(__APPLE__)
 	long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
 
 	if (ncpu == -1)
@@ -297,7 +400,7 @@ static inline long jent_ncpu(void)
      defined(_SC_LEVEL2_CACHE_SIZE) &&					\
      defined(_SC_LEVEL3_CACHE_SIZE)
 
-static inline void jent_get_cachesize(long *l1, long *l2, long *l3)
+static inline void jent_get_cachesize_sysconf(long *l1, long *l2, long *l3)
 {
 	*l1 = sysconf(_SC_LEVEL1_DCACHE_SIZE);
 	*l2 = sysconf(_SC_LEVEL2_CACHE_SIZE);
@@ -306,7 +409,15 @@ static inline void jent_get_cachesize(long *l1, long *l2, long *l3)
 
 # else
 
-static inline void jent_get_cachesize(long *l1, long *l2, long *l3)
+static inline void jent_get_cachesize_sysconf(long *l1, long *l2, long *l3)
+{
+	*l1 = 0;
+	*l2 = 0;
+	*l3 = 0;
+}
+# endif
+
+static inline void jent_get_cachesize_sysfs(long *l1, long *l2, long *l3)
 {
 #define JENT_SYSFS_CACHE_DIR "/sys/devices/system/cpu/cpu0/cache"
 	long val;
@@ -377,39 +488,82 @@ static inline void jent_get_cachesize(long *l1, long *l2, long *l3)
 #undef JENT_SYSFS_CACHE_DIR
 }
 
-# endif
+#endif
 
-static inline uint32_t jent_cache_size_roundup(void)
+#ifdef __APPLE__
+
+static inline void jent_get_cachesize_sysconf(long *l1, long *l2, long *l3)
 {
-	static int checked = 0;
-	static uint32_t cache_size = 0;
+	size_t size;
 
-	if (!checked) {
-		long l1 = 0, l2 = 0, l3 = 0;
+	size = sizeof(*l1);
+	if (sysctlbyname("hw.l1dcachesize", l1, &size, NULL, 0) != 0) {
+		*l1 = 0;
+	}
 
-		jent_get_cachesize(&l1, &l2, &l3);
-		checked = 1;
+	size = sizeof(*l2);
+	if (sysctlbyname("hw.l2cachesize", l2, &size, NULL, 0) != 0) {
+		*l2 = 0;
+	}
 
-		/* Cache size reported by system */
-		if (l1 > 0)
-			cache_size += (uint32_t)l1;
+	size = sizeof(*l3);
+	if (sysctlbyname("hw.l3cachesize", l3, &size, NULL, 0) != 0) {
+		*l3 = 0;
+	}
+}
+
+#endif
+
+#if defined(__linux__) || defined(__APPLE__)
+
+static inline uint32_t jent_cache_size_to_memory(long l1, long l2, long l3,
+						 int all_caches)
+{
+	uint32_t cache_size = 0;
+
+	/* Cache size reported by system */
+	if (l1 > 0)
+		cache_size += (uint32_t)l1;
+	if (all_caches) {
 		if (l2 > 0)
 			cache_size += (uint32_t)l2;
 		if (l3 > 0)
 			cache_size += (uint32_t)l3;
+	}
 
-		/*
-		 * Force the output_size to be of the form
-		 * (bounding_power_of_2 - 1).
-		 */
-		cache_size |= (cache_size >> 1);
-		cache_size |= (cache_size >> 2);
-		cache_size |= (cache_size >> 4);
-		cache_size |= (cache_size >> 8);
-		cache_size |= (cache_size >> 16);
+	/* Force the output_size to be of the form (bounding_power_of_2 - 1). */
+	cache_size |= (cache_size >> 1);
+	cache_size |= (cache_size >> 2);
+	cache_size |= (cache_size >> 4);
+	cache_size |= (cache_size >> 8);
+	cache_size |= (cache_size >> 16);
 
-		if (cache_size == 0)
-			return 0;
+	return cache_size;
+}
+
+static inline uint32_t jent_cache_size_roundup(int all_caches)
+{
+	static int checked = 0;
+	uint32_t cache_size = 0;
+	int checked_all_caches = all_caches + 1;
+
+	if (!cache_size || checked != checked_all_caches) {
+		long l1 = 0, l2 = 0, l3 = 0;
+
+		jent_get_cachesize_sysconf(&l1, &l2, &l3);
+		checked = checked_all_caches;
+
+		cache_size = jent_cache_size_to_memory(l1, l2, l3, all_caches);
+		#ifdef __linux__
+		if (cache_size == 0) {
+			jent_get_cachesize_sysfs(&l1, &l2, &l3);
+			cache_size = jent_cache_size_to_memory(l1, l2, l3,
+							       all_caches);
+
+			if (cache_size == 0)
+				return 0;
+		}
+		#endif
 
 		/*
 		 * Make the output_size the smallest power of 2 strictly
@@ -421,14 +575,15 @@ static inline uint32_t jent_cache_size_roundup(void)
 	return cache_size;
 }
 
-#else /* __linux__ */
+#else /* __linux__ || __APPLE__ */
 
-static inline uint32_t jent_cache_size_roundup(void)
+static inline uint32_t jent_cache_size_roundup(int all_caches)
 {
+	(void)all_caches;
 	return 0;
 }
 
-#endif /* __linux__ */
+#endif /* __linux__ || __APPLE__ */
 
 static inline void jent_yield(void)
 {

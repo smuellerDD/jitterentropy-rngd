@@ -1,7 +1,7 @@
 /*
  * Non-physical true random number generator based on timing jitter.
  *
- * Copyright Stephan Mueller <smueller@chronox.de>, 2014 - 2022
+ * Copyright Stephan Mueller <smueller@chronox.de>, 2014 - 2025
  *
  * Design
  * ======
@@ -29,24 +29,13 @@
  * DAMAGE.
  */
 
-#include "jitterentropy.h"
-
 #include "jitterentropy-base.h"
 #include "jitterentropy-gcd.h"
 #include "jitterentropy-health.h"
+#include "jitterentropy-internal.h"
 #include "jitterentropy-noise.h"
 #include "jitterentropy-timer.h"
 #include "jitterentropy-sha3.h"
-
-#define MAJVERSION 3 /* API / ABI incompatible changes, functional changes that
-		      * require consumer to be updated (as long as this number
-		      * is zero, the API is not considered stable and can
-		      * change without a bump of the major version) */
-#define MINVERSION 4 /* API compatible, ABI may change, functional
-		      * enhancements only, consumer can be left unchanged if
-		      * enhancements are not considered */
-#define PATCHLEVEL 1 /* API / ABI compatible, no functional changes, no
-		      * enhancements, bug fixes only */
 
 /***************************************************************************
  * Jitter RNG Static Definitions
@@ -66,6 +55,21 @@
  */
 #define JENT_POWERUP_TESTLOOPCOUNT 1024
 
+/*
+ * ensure_osr_is_at_least_minimal ensures that the over sampling rate is, at
+ * minimum, JENT_MIN_OSR.
+ *
+ * @return returns the argument current_osr if equal to or larger than
+ * JENT_MIN_OSR otherwise, returns JENT_MIN_OSR.
+ */
+static unsigned int ensure_osr_is_at_least_minimal(unsigned int current_osr)
+{
+	if (current_osr < JENT_MIN_OSR)
+		return (unsigned int) JENT_MIN_OSR;
+	else
+		return current_osr;
+}
+
 /**
  * jent_version() - Return machine-usable version number of jent library
  *
@@ -82,13 +86,23 @@
 JENT_PRIVATE_STATIC
 unsigned int jent_version(void)
 {
-	unsigned int version = 0;
+	return JENT_VERSION;
+}
 
-	version =  MAJVERSION * 1000000;
-	version += MINVERSION * 10000;
-	version += PATCHLEVEL * 100;
-
-	return version;
+/*
+ * jent_secure_memory_supported() - Return if secure memory is used
+ *
+ * Secure memory uses guard pages, swap protection and zeroize on
+ * free.
+ */
+JENT_PRIVATE_STATIC
+int jent_secure_memory_supported(void)
+{
+#ifdef CONFIG_CRYPTO_CPU_JITTERENTROPY_SECURE_MEMORY
+	return 1;
+#else
+	return 0;
+#endif
 }
 
 /***************************************************************************
@@ -105,8 +119,29 @@ static inline unsigned int jent_log2_simple(unsigned int val)
 	return idx;
 }
 
-/* Increase the memory size by one step */
-static inline unsigned int jent_update_memsize(unsigned int flags)
+/*
+ * Obtain memory size to allocate for memory access variations.
+ *
+ * The maximum variations we can get from the memory access is when we allocate
+ * a bit more memory than we have as data cache. But allocating as much
+ * memory as we have as data cache might strain the resources on the system
+ * more than necessary.
+ *
+ * On a lot of systems it is not necessary to need so much memory as the
+ * variations coming from the general Jitter RNG execution commonly provide
+ * large amount of variations.
+ *
+ * Thus, the default is:
+ * * size provided by the caller, or
+ * * cache information * (1 << JENT_CACHE_SHIFT_BITS) where by default
+ *   only L1 cache size is uzed or with JENT_CACHE_ALL all caches are used
+ *   to determine the memory size, or
+ * * 1 << JENT_DEFAULT_MEMORY_BITS
+ *
+ * All is capped by JENT_MAX_MEMSIZE_MAX
+ */
+static inline unsigned int jent_update_memsize(unsigned int flags,
+					       unsigned int inc)
 {
 	unsigned int global_max = JENT_FLAGS_TO_MAX_MEMSIZE(
 							JENT_MAX_MEMSIZE_MAX);
@@ -116,15 +151,32 @@ static inline unsigned int jent_update_memsize(unsigned int flags)
 
 	if (!max) {
 		/*
-		 * The safe starting value is the amount of memory we allocated
-		 * last round.
+		 * The safe starting value is the cache size increased by the
+		 * multiplicator.
 		 */
-		max = jent_log2_simple(JENT_MEMORY_SIZE);
+		max = jent_log2_simple(jent_cache_size_roundup(
+						!!(flags & JENT_CACHE_ALL)));
+		if (!max) {
+			max = JENT_DEFAULT_MEMORY_BITS;
+		} else {
+			max += JENT_CACHE_SHIFT_BITS;
+
+			if (!(flags & JENT_CACHE_ALL)) {
+				/*
+				 * We increase the memory size 4-fold. This is
+				 * due to ensure that the memory access
+				 * operation mostly is caused by L1 misses and
+				 * L2 hits.
+				 */
+				max += 2;
+			}
+		}
+
 		/* Adjust offset */
 		max = (max > JENT_MAX_MEMSIZE_OFFSET) ?
-			max - JENT_MAX_MEMSIZE_OFFSET :	0;
+			max - JENT_MAX_MEMSIZE_OFFSET : 0;
 	} else {
-		max++;
+		max += inc;
 	}
 
 	max = (max > global_max) ? global_max : max;
@@ -133,6 +185,24 @@ static inline unsigned int jent_update_memsize(unsigned int flags)
 	flags &= ~JENT_MAX_MEMSIZE_MASK;
 	/* Set the freshly calculated max size */
 	flags |= JENT_MAX_MEMSIZE_TO_FLAGS(max);
+
+	return flags;
+}
+
+static inline unsigned int jent_update_hashloop(unsigned int flags,
+						unsigned int inc)
+{
+	unsigned int global_max = JENT_FLAGS_TO_HASHLOOP(JENT_MAX_HASHLOOP);
+	unsigned int max;
+
+	max = JENT_FLAGS_TO_HASHLOOP(flags);
+	max += inc;
+	max = (max > global_max) ? global_max : max;
+
+	/* Clear out the max size */
+	flags &= ~(unsigned int)JENT_MAX_HASHLOOP_MASK;
+	/* Set the freshly calculated max size */
+	flags |= JENT_HASHLOOP_TO_FLAGS(max);
 
 	return flags;
 }
@@ -151,10 +221,10 @@ static inline unsigned int jent_update_memsize(unsigned int flags)
  * This function truncates the last 64 bit entropy value output to the exact
  * size specified by the caller.
  *
- * @ec [in] Reference to entropy collector
- * @data [out] pointer to buffer for storing random data -- buffer must
+ * @param[in] ec Reference to entropy collector
+ * @param[out] data pointer to buffer for storing random data -- buffer must
  *	       already exist
- * @len [in] size of the buffer, specifying also the requested number of random
+ * @param[in] len size of the buffer, specifying also the requested number of random
  *	     in bytes
  *
  * @return number of bytes returned when request is fulfilled or an error
@@ -162,9 +232,14 @@ static inline unsigned int jent_update_memsize(unsigned int flags)
  * The following error codes can occur:
  *	-1	entropy_collector is NULL
  *	-2	RCT failed
- *	-3	APT test failed
+ *	-3	APT failed
  *	-4	The timer cannot be initialized
  *	-5	LAG failure
+ *	-6	RCT permanent failure
+ *	-7	APT permanent failure
+ *	-8	LAG permanent failure
+ *	-9	RCT with memory failed
+ *	-10	RCT with memory permanent failure
  */
 JENT_PRIVATE_STATIC
 ssize_t jent_read_entropy(struct rand_data *ec, char *data, size_t len)
@@ -186,10 +261,23 @@ ssize_t jent_read_entropy(struct rand_data *ec, char *data, size_t len)
 		jent_random_data(ec);
 
 		if ((health_test_result = jent_health_failure(ec))) {
-			if (health_test_result & JENT_RCT_FAILURE)
+			if (health_test_result & JENT_RCT_FAILURE_PERMANENT)
+				ret = -6;
+			else if (health_test_result &
+				 JENT_APT_FAILURE_PERMANENT)
+				ret = -7;
+			else if (health_test_result &
+				 JENT_LAG_FAILURE_PERMANENT)
+				ret = -8;
+			else if (health_test_result &
+				 JENT_RCT_MEM_FAILURE_PERMANENT)
+				ret = -10;
+			else if (health_test_result & JENT_RCT_FAILURE)
 				ret = -2;
 			else if (health_test_result & JENT_APT_FAILURE)
 				ret = -3;
+			else if (health_test_result & JENT_RCT_MEM_FAILURE)
+				ret = -9;
 			else
 				ret = -5;
 
@@ -239,6 +327,87 @@ err:
 	return ret ? ret : (ssize_t)orig_len;
 }
 
+static int jent_health_failure_reset(
+	struct rand_data **ec, struct rand_data *(*alloc)(unsigned int osr,
+							  unsigned int flags))
+{
+	unsigned int osr, flags, max_mem_set, apt_observations = 0,
+		     lag_prediction_success_run, lag_prediction_success_count;
+	uint64_t current_delta;
+
+	/* Remember all health test state */
+	apt_observations = (*ec)->apt_observations;
+	current_delta = (*ec)->apt_base;
+#ifdef JENT_HEALTH_LAG_PREDICTOR
+	lag_prediction_success_run = (*ec)->lag_prediction_success_run;
+	lag_prediction_success_count = (*ec)->lag_prediction_success_count;
+#else
+	(void)lag_prediction_success_run;
+	(void)lag_prediction_success_count;
+#endif
+
+	/* Increment OSR */
+	osr = (*ec)->osr + 1;
+
+	/* Remember flags value */
+	flags = (*ec)->flags;
+	max_mem_set = (*ec)->max_mem_set;
+
+	/* generic arbitrary cutoff to prevent running "forever" */
+	if (osr > JENT_MAX_OSR)
+		return -1;
+
+	/*
+	 * If the caller did not set any specific maximum value let the Jitter
+	 * RNG increase the maximum memory by one step.
+	 */
+	if (!max_mem_set)
+		flags = jent_update_memsize(flags, 1);
+
+	/* Increment hash loop count by one */
+	flags = jent_update_hashloop(flags, 1);
+
+	/* re-allocate entropy collector with higher OSR and memory size */
+	jent_entropy_collector_free(*ec);
+	*ec = NULL;
+
+	/* Perform new health test with updated OSR */
+	while (jent_entropy_init_ex(osr, flags)) {
+		osr++;
+		if (osr > JENT_MAX_OSR)
+			return -1;
+	}
+
+	*ec = alloc(osr, flags);
+	if (!*ec)
+		return -1;
+
+	/* Remember whether caller configured memory size */
+	(*ec)->max_mem_set = !!max_mem_set;
+
+	/* Set the health test state in case of intermittent failures. */
+	if (apt_observations) {
+		/* APT re-initialization to intermittent error */
+		jent_apt_reinit(*ec, current_delta, 0, apt_observations);
+
+		/* RCT re-initialization to intermittent error */
+		(*ec)->rct_count =
+			(int)(JENT_HEALTH_RCT_INTERMITTENT_CUTOFF(osr));
+
+		/* LAG re-initialization */
+#ifdef JENT_HEALTH_LAG_PREDICTOR
+		(*ec)->lag_prediction_success_run = lag_prediction_success_run;
+		(*ec)->lag_prediction_success_count =
+			lag_prediction_success_count;
+#endif
+
+		/* RCT with memory re-initialization to intermittent error */
+		(*ec)->rct_mem_count = (*ec)->rct_mem_cutoff;
+	}
+
+	return 0;
+}
+
 static struct rand_data *_jent_entropy_collector_alloc(unsigned int osr,
 						       unsigned int flags);
 
@@ -256,11 +425,11 @@ static struct rand_data *_jent_entropy_collector_alloc(unsigned int osr,
  * getting too large. If an error is returned by this function, the Jitter RNG
  * is not safe to be used on the current system.
  *
- * @ec [in] Reference to entropy collector - this is a double pointer as
+ * @param[in] ec Reference to entropy collector - this is a double pointer as
  *	    The entropy collector may be freed and reallocated.
- * @data [out] pointer to buffer for storing random data -- buffer must
+ * @param[out] data pointer to buffer for storing random data -- buffer must
  *	       already exist
- * @len [in] size of the buffer, specifying also the requested number of random
+ * @param[in] len size of the buffer, specifying also the requested number of random
  *	     in bytes
  *
  * @return see jent_read_entropy()
@@ -276,55 +445,52 @@ ssize_t jent_read_entropy_safe(struct rand_data **ec, char *data, size_t len)
 		return -1;
 
 	while (len > 0) {
-		unsigned int osr, flags, max_mem_set;
-
 		ret = jent_read_entropy(*ec, p, len);
 
 		switch (ret) {
+			/* Generic errors are returned immediately */
 		case -1:
 		case -4:
+
+			/* Permanent health errors are returned immediately */
+		case -6:
+		case -7:
+		case -8:
+		case -10:
 			return ret;
+
+			/* Intermittent health errors */
 		case -2:
 		case -3:
 		case -5:
-			osr = (*ec)->osr + 1;
-			flags = (*ec)->flags;
-			max_mem_set = (*ec)->max_mem_set;
-
-			/* generic arbitrary cutoff */
-			if (osr > 20)
+		case -9:
+			/*
+			 * Re-allocate the entropy collector with updated
+			 * OSR, hash loop count and memory size and run
+			 * the startup sequence for NTG.1 again.
+			 *
+			 * If we fail here, the Jitter RNG returns the error.
+			 */
+			if (jent_health_failure_reset(
+				ec, _jent_entropy_collector_alloc))
 				return ret;
 
 			/*
-			 * If the caller did not set any specific maximum value
-			 * let the Jitter RNG increase the maximum memory by
-			 * one step.
+			 * We are not returning the intermittent errors here.
+			 * If a caller wants them, he should register a callback
+			 * with jent_set_fips_failure_callback.
 			 */
-			if (!max_mem_set)
-				flags = jent_update_memsize(flags);
-
-			/*
-			 * re-allocate entropy collector with higher OSR and
-			 * memory size
-			 */
-			jent_entropy_collector_free(*ec);
-
-			/* Perform new health test with updated OSR */
-			if (jent_entropy_init_ex(osr, flags))
-				return -1;
-
-			*ec = _jent_entropy_collector_alloc(osr, flags);
-			if (!*ec)
-				return -1;
-
-			/* Remember whether caller configured memory size */
-			(*ec)->max_mem_set = !!max_mem_set;
 
 			break;
 
 		default:
-			len -= (size_t)ret;
-			p += (size_t)ret;
+			/* defensive check for uncaught errors */
+			if (ret >= 0) {
+				len -= (size_t)ret;
+				p += (size_t)ret;
+			} else {
+				return -1;
+			}
 		}
 	}
 
@@ -335,51 +501,31 @@ ssize_t jent_read_entropy_safe(struct rand_data **ec, char *data, size_t len)
  * Initialization logic
  ***************************************************************************/
 
-/*
- * Obtain memory size to allocate for memory access variations.
- *
- * The maximum variations we can get from the memory access is when we allocate
- * a bit more memory than we have as data cache. But allocating as much
- * memory as we have as data cache might strain the resources on the system
- * more than necessary.
- *
- * On a lot of systems it is not necessary to need so much memory as the
- * variations coming from the general Jitter RNG execution commonly provide
- * large amount of variations.
- *
- * Thus, the default is:
- *
- * min(JENT_MEMORY_SIZE, data cache size)
- *
- * In case the data cache size cannot be obtained, use JENT_MEMORY_SIZE.
- *
- * If the caller provides a maximum memory size, use
- * min(provided max memory, data cache size).
- */
-static inline uint32_t jent_memsize(unsigned int flags)
+uint32_t jent_memsize(unsigned int flags)
 {
-	uint32_t memsize, max_memsize;
+	uint32_t memsize = JENT_FLAGS_TO_MAX_MEMSIZE(flags);
 
-	max_memsize = JENT_FLAGS_TO_MAX_MEMSIZE(flags);
-
-	if (max_memsize == 0) {
-		max_memsize = JENT_MEMORY_SIZE;
+	if (memsize == 0) {
+		memsize = JENT_DEFAULT_MEMORY_BITS;
 	} else {
-		max_memsize = UINT32_C(1) << (max_memsize +
-					      JENT_MAX_MEMSIZE_OFFSET);
+		memsize = memsize + JENT_MAX_MEMSIZE_OFFSET;
 	}
 
-	/* Allocate memory for adding variations based on memory access */
-	memsize = jent_cache_size_roundup();
-
-	/* Limit the memory as defined by caller */
-	memsize = (memsize > max_memsize) ? max_memsize : memsize;
-
-	/* Set a value if none was found */
-	if (!memsize)
-		memsize = JENT_MEMORY_SIZE;
+	memsize = UINT32_C(1) << memsize;
 
 	return memsize;
+}
+
+unsigned int jent_hashloop_cnt(unsigned int flags)
+{
+	unsigned int cnt = JENT_FLAGS_TO_HASHLOOP(flags);
+
+	if (cnt == 0)
+		cnt = JENT_HASH_LOOP_DEFAULT;
+	else
+		cnt = UINT32_C(1) << cnt;
+
+	return cnt;
 }
 
 static int jent_selftest_run = 0;
@@ -398,9 +544,20 @@ static struct rand_data
 	    (flags & JENT_FORCE_INTERNAL_TIMER))
 		return NULL;
 
+	/*
+	 * Ensure over sampling rate is not too low.
+	 */
+	osr = ensure_osr_is_at_least_minimal(osr);
+
 	/* Force the self test to be run */
 	if (!jent_selftest_run && jent_entropy_init_ex(osr, flags))
 		return NULL;
+
+	/*
+	 * NTG.1 requires to disable the internal timer.
+	 */
+	if (flags & JENT_NTG1)
+		flags |= JENT_DISABLE_INTERNAL_TIMER;
 
 	/*
 	 * If the initial test code concludes to force the internal timer
@@ -415,51 +572,65 @@ static struct rand_data
 		return NULL;
 
 	if (!(flags & JENT_DISABLE_MEMORY_ACCESS)) {
+		flags = jent_update_memsize(flags, 0);
 		memsize = jent_memsize(flags);
 		entropy_collector->mem = (unsigned char *)jent_zalloc(memsize);
 
-#ifdef JENT_RANDOM_MEMACCESS
 		/*
 		 * Transform the size into a mask - it is assumed that size is
 		 * a power of 2.
 		 */
 		entropy_collector->memmask = memsize - 1;
-#else /* JENT_RANDOM_MEMACCESS */
-		entropy_collector->memblocksize = memsize / JENT_MEMORY_BLOCKS;
-		entropy_collector->memblocks = JENT_MEMORY_BLOCKS;
-
-		/* sanity check */
-		if (entropy_collector->memblocksize *
-		    entropy_collector->memblocks != memsize)
-			goto err;
-
-#endif /* JENT_RANDOM_MEMACCESS */
-
 		if (entropy_collector->mem == NULL)
 			goto err;
-		entropy_collector->memaccessloops = JENT_MEMORY_ACCESSLOOPS;
+		entropy_collector->memaccessloops = JENT_MEM_ACC_LOOP_DEFAULT;
 	}
 
-	if (sha3_alloc(&entropy_collector->hash_state))
+	/* Set the hash loop count */
+	flags = jent_update_hashloop(flags, 0);
+	entropy_collector->hashloopcnt = jent_hashloop_cnt(flags);
+
+	if (jent_sha3_alloc(&entropy_collector->hash_state))
 		goto err;
 
-	/* Initialize the hash state */
-	sha3_256_init(entropy_collector->hash_state);
+	/*
+	 * Initialize the hash state for the XDRBG
+	 */
+	jent_shake256_init(entropy_collector->hash_state);
 
-	/* verify and set the oversampling rate */
-	if (osr < JENT_MIN_OSR)
-		osr = JENT_MIN_OSR;
+	if ((flags & JENT_FORCE_FIPS) || jent_fips_enabled()) {
+		/*
+		 * NIST explicitly suggested to use an identical approach
+		 * to the initialization of the conditioner as specified
+		 * for the NTG.1 compliance.
+		 */
+		entropy_collector->startup_state = jent_startup_memory;
+		entropy_collector->fips_enabled = 1;
+	}
+
+	/* Set the oversampling rate */
 	entropy_collector->osr = osr;
 	entropy_collector->flags = flags;
 
-	if ((flags & JENT_FORCE_FIPS) || jent_fips_enabled())
+	/*
+	 * BSI AIS 20/31 NTG.1 requires that during startup 2 noise sources
+	 * are sampled where each independently delivers 240 bits of entropy.
+	 * This is ensured by setting the startup state such that the memory
+	 * access is treated independently from the SHA3 operation and both
+	 * must separately deliver the requested amount of entropy.
+	 *
+	 * NTG.1 implies the enabling of the FIPS mode to apply noise source
+	 * oversampling and the enabling of the health tests.
+	 */
+	if (flags & JENT_NTG1) {
+		entropy_collector->startup_state = jent_startup_memory;
 		entropy_collector->fips_enabled = 1;
+	}
 
-	/* Initialize the APT */
-	jent_apt_init(entropy_collector, osr);
-
-	/* Initialize the Lag Predictor Test */
-	jent_lag_init(entropy_collector, osr);
+	/* Initialize the health tests */
+	jent_health_init(entropy_collector, flags & JENT_NTG1 ?
+					    jent_health_init_type_ntg1_startup :
+					    jent_health_init_type_common);
 
 	/* Was jent_entropy_init run (establishing the common GCD)? */
 	if (jent_gcd_get(&entropy_collector->jent_common_timer_gcd)) {
@@ -483,9 +654,7 @@ static struct rand_data
 	return entropy_collector;
 
 err:
-	if (entropy_collector->mem != NULL)
-		jent_zfree(entropy_collector->mem, memsize);
-	jent_zfree(entropy_collector, sizeof(struct rand_data));
+	jent_entropy_collector_free(entropy_collector);
 	return NULL;
 }
 
@@ -503,7 +672,44 @@ static struct rand_data *_jent_entropy_collector_alloc(unsigned int osr,
 		jent_entropy_collector_free(ec);
 		return NULL;
 	}
-	jent_random_data(ec);
+
+	/*
+	 * Assure, that we always have 512 bits (NTG.1 / FIPS compliance due to
+	 * startup_state is set to 2) or 256 bits (other cases) entropy in
+	 * our hash state before outputting a block by adding at least 256 bits
+	 * before first usage. 512 bits are always transferred to the next state
+	 * before the actual generation of random numbers to be returned to the
+	 * caller. The size is due to the XDRBG state variable.
+	 *
+	 * For NTG.1: already perform the startup stages guaranteeing the
+	 * invocation of 2 noise sources each delivering 240 bits of entropy
+	 * at least at this point.
+	 */
+	do {
+		jent_random_data(ec);
+
+		/*
+		 * Check for any kind of health error at this point including
+		 * intermittent or permanent errors. If we observed one,
+		 * re-initialize the entropy collector.
+		 */
+		if (jent_health_failure(ec)) {
+
+			/*
+			 * Re-allocate the entropy collector with updated
+			 * OSR, hash loop count and memory size.
+			 */
+			if (jent_health_failure_reset(
+				&ec, jent_entropy_collector_alloc_internal)) {
+				jent_entropy_collector_free(ec);
+				return NULL;
+			}
+
+			/* Rerun startup sequence */
+			continue;
+		}
+	} while (ec->startup_state != jent_startup_completed);
+
 	jent_notime_unsettick(ec);
 
 	return ec;
@@ -515,9 +721,13 @@ struct rand_data *jent_entropy_collector_alloc(unsigned int osr,
 {
 	struct rand_data *ec = _jent_entropy_collector_alloc(osr, flags);
 
-	/* Remember that the caller provided a maximum size flag */
-	if (ec)
-		ec->max_mem_set = !!JENT_FLAGS_TO_MAX_MEMSIZE(flags);
+	if (!ec)
+		return ec;
+
+	/*
+	 * Define max_mem_set only if the external caller defined such memory.
+	 */
+	ec->max_mem_set = !!JENT_FLAGS_TO_MAX_MEMSIZE(flags);
 
 	return ec;
 }
@@ -526,8 +736,16 @@ JENT_PRIVATE_STATIC
 void jent_entropy_collector_free(struct rand_data *entropy_collector)
 {
 	if (entropy_collector != NULL) {
-		sha3_dealloc(entropy_collector->hash_state);
+		/* Safety measure */
+		jent_notime_unsettick(entropy_collector);
+
 		jent_notime_disable(entropy_collector);
+
+		if (entropy_collector->hash_state != NULL) {
+			jent_sha3_dealloc(entropy_collector->hash_state);
+			entropy_collector->hash_state = NULL;
+		}
+
 		if (entropy_collector->mem != NULL) {
 			jent_zfree(entropy_collector->mem,
 				   jent_memsize(entropy_collector->flags));
@@ -543,6 +761,11 @@ int jent_time_entropy_init(unsigned int osr, unsigned int flags)
 	uint64_t *delta_history;
 	int i, time_backwards = 0, count_stuck = 0, ret = 0;
 	unsigned int health_test_result;
+
+	/*
+	 * Ensure over sampling rate is not too low.
+	 */
+	osr = ensure_osr_is_at_least_minimal(osr);
 
 	delta_history = jent_gcd_init(JENT_POWERUP_TESTLOOPCOUNT);
 	if (!delta_history)
@@ -653,7 +876,7 @@ int jent_time_entropy_init(unsigned int osr, unsigned int flags)
 		goto out;
 	}
 
-	ret = jent_gcd_analyze(delta_history, JENT_POWERUP_TESTLOOPCOUNT);
+	ret = jent_gcd_analyze(delta_history, JENT_POWERUP_TESTLOOPCOUNT, osr);
 	if (ret)
 		goto out;
 
@@ -667,7 +890,8 @@ int jent_time_entropy_init(unsigned int osr, unsigned int flags)
 out:
 	jent_gcd_fini(delta_history, JENT_POWERUP_TESTLOOPCOUNT);
 
-	if ((flags & JENT_FORCE_INTERNAL_TIMER) && ec)
+	/* NOOP if notime disabled. Can be done unconditionally */
+	if (ec)
 		jent_notime_unsettick(ec);
 
 	jent_entropy_collector_free(ec);
@@ -682,7 +906,7 @@ static inline int jent_entropy_init_common_pre(void)
 	jent_notime_block_switch();
 	jent_health_cb_block_switch();
 
-	if (sha3_tester())
+	if (jent_sha3_tester())
 		return EHASH;
 
 	ret = jent_gcd_selftest();

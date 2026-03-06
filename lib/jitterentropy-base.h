@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2021 - 2022, Stephan Mueller <smueller@chronox.de>
+ * Copyright (C) 2021 - 2025, Stephan Mueller <smueller@chronox.de>
  *
  * License: see LICENSE file in root directory
  *
@@ -20,12 +20,16 @@
 #ifndef JITTERENTROPY_BASE_H
 #define JITTERENTROPY_BASE_H
 
+#include "jitterentropy.h"
+
 #ifdef __cplusplus
 extern "C"
 {
 #endif
 
 int jent_time_entropy_init(unsigned int osr, unsigned int flags);
+uint32_t jent_memsize(unsigned int flags);
+unsigned int jent_hashloop_cnt(unsigned int flags);
 
 #ifdef __cplusplus
 }

@@ -1,7 +1,7 @@
 /* Jitter RNG: GCD health test
  *
- * Copyright (C) 2021 - 2022, Joshua E. Hill <josh@keypair.us>
- * Copyright (C) 2021 - 2022, Stephan Mueller <smueller@chronox.de>
+ * Copyright (C) 2021 - 2025, Joshua E. Hill <josh@keypair.us>
+ * Copyright (C) 2021 - 2025, Stephan Mueller <smueller@chronox.de>
  *
  * License: see LICENSE file in root directory
  *
@@ -19,8 +19,8 @@
  * DAMAGE.
  */
 
-#include "jitterentropy.h"
 #include "jitterentropy-gcd.h"
+#include "jitterentropy-internal.h"
 
 /* The common divisor for all timestamp deltas */
 static uint64_t jent_common_timer_gcd = 0;
@@ -96,7 +96,7 @@ static int jent_gcd_analyze_internal(uint64_t *delta_history, size_t nelem,
 	return 0;
 }
 
-int jent_gcd_analyze(uint64_t *delta_history, size_t nelem)
+int jent_gcd_analyze(uint64_t *delta_history, size_t nelem, size_t osr)
 {
 	uint64_t running_gcd, delta_sum;
 	int ret = jent_gcd_analyze_internal(delta_history, nelem, &running_gcd,
@@ -106,10 +106,12 @@ int jent_gcd_analyze(uint64_t *delta_history, size_t nelem)
 		return 0;
 
 	/*
-	 * Variations of deltas of time must on average be larger than 1 to
-	 * ensure the entropy estimation implied with 1 is preserved.
+	 * We assume 1/osr bits of entropy per sample. On average, variations
+	 * of deltas must be larger than 1 over osr cases; we do not capture
+	 * fractions. Hence delta_sum < (nelem / osr) means we cannot satisfy the
+	 * 1/osr bits of entropy per sample assumption.
 	 */
-	if (delta_sum <= nelem - 1) {
+	if ((delta_sum * osr) < nelem) {
 		ret = EMINVARVAR;
 		goto out;
 	}

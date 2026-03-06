@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2021 - 2022, Stephan Mueller <smueller@chronox.de>
+ * Copyright (C) 2021 - 2025, Stephan Mueller <smueller@chronox.de>
  *
  * License: see LICENSE file in root directory
  *
@@ -20,7 +20,7 @@
 #ifndef JITTERENTROPY_TIMER_H
 #define JITTERENTROPY_TIMER_H
 
-#include "jitterentropy.h"
+#include "jitterentropy-internal.h"
 
 #ifdef __cplusplus
 extern "C"
@@ -76,7 +76,7 @@ static inline void jent_notime_disable(struct rand_data *ec)
 static inline int jent_notime_switch(struct jent_notime_thread *new_thread)
 {
 	(void)new_thread;
-	return -EOPNOTSUPP;
+	return -1;
 }
 
 static inline void jent_notime_force(void) { }

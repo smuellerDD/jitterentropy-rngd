@@ -1,7 +1,7 @@
 ﻿/*
  * Non-physical true random number generator based on timing jitter.
  *
- * Copyright Stephan Mueller <smueller@chronox.de>, 2014 - 2022
+ * Copyright Stephan Mueller <smueller@chronox.de>, 2014 - 2026
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -61,10 +61,10 @@
 		      * require consumer to be updated (as long as this number
 		      * is zero, the API is not considered stable and can
 		      * change without a bump of the major version) */
-#define MINVERSION 2 /* API compatible, ABI may change, functional
+#define MINVERSION 3 /* API compatible, ABI may change, functional
 		      * enhancements only, consumer can be left unchanged if
 		      * enhancements are not considered */
-#define PATCHLEVEL 8 /* API / ABI compatible, no functional changes, no
+#define PATCHLEVEL 0 /* API / ABI compatible, no functional changes, no
 		      * enhancements, bug fixes only */
 
 static int Verbosity = 0;
@@ -309,6 +309,26 @@ static void parse_opts(int argc, char *argv[])
 		case 's':
 			force_sp80090b = 1;
 			break;
+		case 'f':
+		{
+			unsigned long val = strtoul(optarg, NULL, 10);
+
+			if (val > UINT_MAX)
+				usage();
+			jent_flags = (unsigned int)val;
+
+			break;
+		}
+		case 'o':
+		{
+			unsigned long val = strtoul(optarg, NULL, 10);
+
+			if (val > UINT_MAX)
+				usage();
+			jent_osr = (unsigned int)val;
+
+			break;
+		}
 		default:
 			usage();
 		}
@@ -400,15 +420,20 @@ static ssize_t write_random(struct kernel_rng *rng, char *buf, size_t len,
 	 * The LRNG does not require this IOCTL as the reseed is automatically
 	 * triggered.
 	 */
-	if (force_reseed && kernver_ge(4, 17, 0) &&
-	    !lrng_present() &&
-	    ioctl(rng->fd, RNDRESEEDCRNG) < 0 && errno != EINVAL) {
-		dolog(LOG_WARN,
-		      "Error triggering a reseed of the kernel DRNG: %s\n",
-		      strerror(errno));
+	if (force_reseed && kernver_ge(4, 17, 0) && !lrng_present()) {
+		if (ioctl(rng->fd, RNDRESEEDCRNG) < 0) {
+			if (errno == EINVAL)
+				goto out;
+			dolog(LOG_WARN,
+			      "Error triggering a reseed of the kernel DRNG: %s",
+			      strerror(errno));
+		} else {
+			dolog(LOG_DEBUG, "Reseeding of kernel DRNG triggered");
+		}
 	}
 #endif
 
+out:
 	return written;
 }
 
@@ -520,8 +545,30 @@ static ssize_t gather_entropy(struct kernel_rng *rng, int init)
 		if (read_jent(rng, buf, buflen) < 0)
 			return 0;
 
-		/* LRNG seeds automatically */
-		ret = write_random(rng, buf, buflen, ENTROPYBYTES, 0);
+		dolog(LOG_DEBUG, "LRNG: Inject %u bits of data with %u bits of entropy into Blake2S state",
+		      buflen << 3, buflen << 3);
+
+		/*
+		 * Write the entropy, LRNG seeds automatically - the Jitter RNG
+		 * provides full entropy so, we tell the Linux RNG the amount of
+		 * entropy.
+		 */
+		ret = write_random(rng, buf, buflen, buflen, 0);
+	} else if (kernver_ge(5, 18, 0)) {
+		/*
+		 * AIS 20/31 DRT.1, no special handling is necessary.
+		 */
+		if (read_jent(rng, buf, buflen) < 0)
+			return 0;
+
+		dolog(LOG_DEBUG, "Linux kernel >= 5.18: Inject %u bits of data with %u bits of entropy into Blake2S state",
+		      buflen << 3, buflen << 3);
+
+		/*
+		 * Write the entropy and trigger reseed - the Jitter RNG provides
+		 * full entropy so, we tell the Linux RNG the amount of entropy.
+		 */
+		ret = write_random(rng, buf, buflen, buflen, 1);
 	} else if (kernver_ge(4, 17, 0)) {
 		unsigned int numblocks = 1, i;
 
@@ -537,7 +584,7 @@ static ssize_t gather_entropy(struct kernel_rng *rng, int init)
 		if (read_jent(rng, buf, buflen) < 0)
 			return 0;
 
-		dolog(LOG_DEBUG, "Inject entropy into %s",
+		dolog(LOG_DEBUG, "Linux kernel >= 4.17: Inject entropy into %s",
 		      force_sp80090b ? "ChaCha20 DRNG" : "input pool");
 		ret = write_random_90B(rng, buf, ENTBLOCKSIZE, ENTROPYBYTES,
 				       force_sp80090b || init);
@@ -554,6 +601,9 @@ static ssize_t gather_entropy(struct kernel_rng *rng, int init)
 
 		if (read_jent(rng, buf, buflen) < 0)
 			return 0;
+
+		dolog(LOG_DEBUG, "Fallback case: Inject %u bits of data with %u bits of entropy into Blake2S state",
+		      buflen << 3, (buflen / OVERSAMPLINGFACTOR) << 3);
 
 		ret = write_random_90B(rng, buf, buflen,
 				       buflen / OVERSAMPLINGFACTOR, 0);

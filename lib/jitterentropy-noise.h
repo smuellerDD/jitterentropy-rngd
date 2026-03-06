@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2021 - 2022, Stephan Mueller <smueller@chronox.de>
+ * Copyright (C) 2021 - 2025, Stephan Mueller <smueller@chronox.de>
  *
  * License: see LICENSE file in root directory
  *
@@ -20,13 +20,19 @@
 #ifndef JITTERENTROPY_NOISE_H
 #define JITTERENTROPY_NOISE_H
 
-#include "jitterentropy.h"
+#include "jitterentropy-internal.h"
 
 #ifdef __cplusplus
 extern "C"
 {
 #endif
 
+unsigned int jent_measure_jitter_ntg1_memaccess(struct rand_data *ec,
+						uint64_t loop_cnt,
+						uint64_t *ret_current_delta);
+unsigned int jent_measure_jitter_ntg1_sha3(struct rand_data *ec,
+					   uint64_t loop_cnt,
+					   uint64_t *ret_current_delta);
 unsigned int jent_measure_jitter(struct rand_data *ec,
 				 uint64_t loop_cnt,
 				 uint64_t *ret_current_delta);
