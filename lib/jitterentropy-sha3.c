@@ -1,6 +1,6 @@
 /* Jitter RNG: Keccak / SHA-3 / SHAKE / XDRBG Implementation
  *
- * Copyright (C) 2021 - 2025, Stephan Mueller <smueller@chronox.de>
+ * Copyright (C) 2021 - 2026, Stephan Mueller <smueller@chronox.de>
  *
  * License: see LICENSE file in root directory
  *
@@ -395,7 +395,7 @@ void jent_sha3_dealloc(void *hash_state)
 
 /*********************************** XDRBG ************************************/
 
-#define JENT_XDRBG_DRNG_ENCODE_N(x) (x * 85)
+#define JENT_XDRBG_DRNG_ENCODE_N(x) ((x) * 85)
 
 /*
  * This operation implements XDRBG-256 as defined in [1].

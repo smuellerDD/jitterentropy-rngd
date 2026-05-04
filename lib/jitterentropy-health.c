@@ -1,7 +1,7 @@
 /* Jitter RNG: Health Tests
  *
- * Copyright (C) 2021 - 2025, Joshua E. Hill <josh@keypair.us>
- * Copyright (C) 2021 - 2025, Stephan Mueller <smueller@chronox.de>
+ * Copyright (C) 2021 - 2026, Joshua E. Hill <josh@keypair.us>
+ * Copyright (C) 2021 - 2026, Stephan Mueller <smueller@chronox.de>
  *
  * License: see LICENSE file in root directory
  *
@@ -20,6 +20,7 @@
  */
 
 #include "jitterentropy-health.h"
+#include "jitterentropy-noise.h"
 
 static jent_fips_failure_cb fips_cb = NULL;
 static int jent_health_cb_switch_blocked = 0;
@@ -225,6 +226,22 @@ static inline uint64_t jent_delta3(struct rand_data *ec, uint64_t delta2)
 				     JENT_LAG_HISTORY(ec, 0)), delta2);
 }
 
+void jent_lag_duplicate(struct rand_data *new_ec, struct rand_data *old_ec)
+{
+	unsigned int i;
+
+	new_ec->lag_prediction_success_run = old_ec->lag_prediction_success_run;
+	new_ec->lag_prediction_success_count =
+		old_ec->lag_prediction_success_count;
+	new_ec->lag_best_predictor = old_ec->lag_best_predictor;
+	new_ec->lag_observations = old_ec->lag_observations;
+
+	for (i = 0; i < JENT_LAG_HISTORY_SIZE; i++) {
+		new_ec->lag_scoreboard[i] = old_ec->lag_scoreboard[i];
+		new_ec->lag_delta_history[i] = old_ec->lag_delta_history[i];
+	}
+}
+
 #else /* JENT_HEALTH_LAG_PREDICTOR */
 
 static inline void jent_lag_insert(struct rand_data *ec, uint64_t current_delta)
@@ -254,6 +271,13 @@ static inline void jent_lag_init(struct rand_data *ec, unsigned int osr)
 	(void)ec;
 	(void)osr;
 }
+
+void jent_lag_duplicate(struct rand_data *new_ec, struct rand_data *old_ec)
+{
+	new_ec->last_delta = old_ec->last_delta;
+	new_ec->last_delta2 = old_ec->last_delta2;
+}
+
 #endif /* JENT_HEALTH_LAG_PREDICTOR */
 
 /***************************************************************************
@@ -305,69 +329,39 @@ static void jent_apt_init(struct rand_data *ec)
 }
 
 /*
- * For NTG.1: 8-fold security margin during startup
+ * For NTG.1: 8-fold security margin
  * alpha for intermdiate error: 2^-30
  * alpha for permanent error: 2^-60
  *
  * Example formula for R for intermediate cutoffs:
  * C = 2 + qbinom(1 - 2^(-30), 511, 2^(-8/osr))
  */
-static const unsigned int jent_apt_cutoff_lookup_ntg1_startup[15]=
+static const unsigned int jent_apt_cutoff_lookup_ntg1[15]=
 	{ 17, 71, 136, 191, 236, 272, 301, 325,
 	  345, 361, 375, 388, 398, 407, 415 };
-static const unsigned int jent_apt_cutoff_permanent_lookup_ntg1_startup[15]=
+static const unsigned int jent_apt_cutoff_permanent_lookup_ntg1[15]=
 	{ 26, 92, 162, 221, 267, 303, 332, 355,
 	  375, 390, 404, 415, 425, 433, 440 };
 
-static void jent_apt_init_ntg1_startup(struct rand_data *ec)
+static void jent_apt_init_ntg1(struct rand_data *ec)
 {
-	if (ec->osr >= ARRAY_SIZE(jent_apt_cutoff_lookup_ntg1_startup)) {
-		ec->apt_cutoff = jent_apt_cutoff_lookup_ntg1_startup[
-			ARRAY_SIZE(jent_apt_cutoff_lookup_ntg1_startup) - 1];
+	if (ec->osr >= ARRAY_SIZE(jent_apt_cutoff_lookup_ntg1)) {
+		ec->apt_cutoff = jent_apt_cutoff_lookup_ntg1[
+			ARRAY_SIZE(jent_apt_cutoff_lookup_ntg1) - 1];
 		ec->apt_cutoff_permanent =
-			jent_apt_cutoff_permanent_lookup_ntg1_startup[
-			ARRAY_SIZE(jent_apt_cutoff_permanent_lookup_ntg1_startup) - 1];
+			jent_apt_cutoff_permanent_lookup_ntg1[
+			ARRAY_SIZE(jent_apt_cutoff_permanent_lookup_ntg1) - 1];
 	} else {
-		ec->apt_cutoff = jent_apt_cutoff_lookup_ntg1_startup[ec->osr - 1];
+		ec->apt_cutoff = jent_apt_cutoff_lookup_ntg1[ec->osr - 1];
 		ec->apt_cutoff_permanent =
-			jent_apt_cutoff_permanent_lookup_ntg1_startup[ec->osr - 1];
+			jent_apt_cutoff_permanent_lookup_ntg1[ec->osr - 1];
 	}
 }
 
-/*
- * For NTG.1: 4-fold security margin during runtime
- * alpha for intermdiate error: 2^-30
- * alpha for permanent error: 2^-60
- *
- * Example formula for R for intermediate cutoffs:
- * C = 2 + qbinom(1 - 2^(-30), 511, 2^(-4/osr))
- */
-static const unsigned int jent_apt_cutoff_lookup_ntg1_runtime[15]=
-	{ 71, 191, 272, 325, 361, 388, 407, 422,
-	  434, 444, 452, 459, 464, 469, 473 };
-static const unsigned int jent_apt_cutoff_permanent_lookup_ntg1_runtime[15]=
-	{ 92, 221, 303, 355, 390, 415, 433, 447,
-	  458, 466, 473, 479, 484, 487, 491 };
-
-static void jent_apt_init_ntg1_runtime(struct rand_data *ec)
-{
-	if (ec->osr >= ARRAY_SIZE(jent_apt_cutoff_lookup_ntg1_runtime)) {
-		ec->apt_cutoff = jent_apt_cutoff_lookup_ntg1_runtime[
-			ARRAY_SIZE(jent_apt_cutoff_lookup_ntg1_runtime) - 1];
-		ec->apt_cutoff_permanent =
-			jent_apt_cutoff_permanent_lookup_ntg1_runtime[
-			ARRAY_SIZE(jent_apt_cutoff_permanent_lookup_ntg1_runtime) - 1];
-	} else {
-		ec->apt_cutoff = jent_apt_cutoff_lookup_ntg1_runtime[ec->osr - 1];
-		ec->apt_cutoff_permanent =
-			jent_apt_cutoff_permanent_lookup_ntg1_runtime[ec->osr - 1];
-	}
-}
-
-void jent_apt_reinit(struct rand_data *ec,
-		     uint64_t current_delta,
-		     unsigned int apt_count,
-		     unsigned int apt_observations)
+static void jent_apt_reinit(struct rand_data *ec,
+			    uint64_t current_delta,
+			    unsigned int apt_count,
+			    unsigned int apt_observations)
 {
 	ec->apt_base = current_delta;	/* APT Step 1 */
 	ec->apt_base_set = 1;		/* APT Step 2 */
@@ -383,6 +377,15 @@ void jent_apt_reinit(struct rand_data *ec,
 	else
 		ec->apt_count = ec->apt_cutoff;
 	ec->apt_observations = apt_observations;
+}
+
+void jent_apt_duplicate(struct rand_data *new_ec, struct rand_data *old_ec)
+{
+	if (old_ec->apt_observations) {
+		/* APT re-initialization to intermittent error */
+		jent_apt_reinit(new_ec, old_ec->apt_base, 0,
+				old_ec->apt_observations);
+	}
 }
 
 /**
@@ -445,18 +448,30 @@ static void jent_apt_insert(struct rand_data *ec, uint64_t current_delta)
  *
  * The intermittent cutoff is defined by calculating
  * round(pnorm(2^(-(safety_factor)/OSR))*321*OSR)
- * where safety_factor is 1 for common case, 8 for the NTG.1 startup and 4
- * for the NTG.1 runtime.
+ * where safety_factor is 1 for common case, 8 for the NTG.1.
  *
  * The permanent cutoff is defined by calculating
  * round(pnorm(2^(-(safety_factor / 2)/OSR))*321*OSR)
  ***************************************************************************/
+
+/*
+ * Recovery loop count defining the number of successful generation of
+ * random blocks after a RCT with mem health alarm to recover from that
+ * alarm.
+ */
+#define JENT_RCT_MEM_RECOVERY_LOOP_CNT 10
+
+/*
+ * RCT with memory using tau = 3 - these values effectively disables the
+ * health test.
+ */
 static const unsigned short jent_rct_mem_cutoff_lookup[] =
-	{ 222,  488,  757,  1027, 1297, 1567, 1837, 2107, 2377, 2647,
-	  2917, 3187, 3457, 3727, 3997, 4267, 4537, 4807, 5078, 5348 };
+	{ 107,  214,  321,  428,  535,  642,  749,  856,  963, 1070,
+	  1177, 1284, 1391, 1498, 1605, 1712, 1819, 1926, 2033, 2140 };
+/* RCT with memory using tau = 3 */
 static const unsigned short jent_rct_mem_cutoff_permanent_lookup[] =
-	{ 244,  513,  783,  1053, 1323, 1594, 1864, 2134, 2404, 2674,
-	  2944, 3214, 3484, 3754, 4024, 4294, 4564, 4834, 5104, 5375 };
+	{ 108,  215,  322,  429,  536,  643,  750,  857,  964, 1071,
+	  1178, 1285, 1392, 1499, 1606, 1713, 1820, 1927, 2034, 2141 };
 
 static void jent_rct_mem_init(struct rand_data *ec)
 {
@@ -473,73 +488,126 @@ static void jent_rct_mem_init(struct rand_data *ec)
 	}
 }
 
-/* For NTG.1: 8-fold security margin during startup */
-static const unsigned short jent_rct_mem_cutoff_lookup_ntg1_startup[] =
-	{ 161,  337,  542,  769,  1010, 1260, 1516, 1776, 2038, 2302,
-	  2567, 2834, 3101, 3368, 3636, 3905, 4173, 4442, 4711, 4980 };
-static const unsigned short jent_rct_mem_cutoff_permanent_lookup_ntg1_startup[] =
-	{ 168,  384,  630,  888,  1151, 1417, 1684, 1952, 2221, 2490,
-	  2759, 3029, 3298, 3568, 3838, 4108, 4378, 4648, 4917, 5187 };
-
-static void jent_rct_mem_init_ntg1_startup(struct rand_data *ec)
+/*
+ * For NTG.1: 8-fold security margin using tau 4 with a significance level
+ * pnorm(-4) yielding 3.17e-05 (roughly 2^-15) for first-order errors. Due to
+ * the recovery loop we can afford such higher value.
+ */
+static const unsigned short jent_rct_mem_cutoff_lookup_ntg1[] =
+	{ 4,    46,   134,  255,  399,  560,  733,  856,  963,  1070,
+	  1177, 1284, 1391, 1498, 1605, 1712, 1819, 1926, 2033, 2140 };
+/*
+ * For NTG.1: 8-fold security margin using tau 5 with a significance level of
+ * pnorm(-5) yielding about 2^-20.
+ */
+static const unsigned short jent_rct_mem_cutoff_permanent_lookup_ntg1[] =
+	{ 5,    50,   142,  265,  410,  572,  746,  857,  964,  1071,
+	  1178, 1285, 1392, 1499, 1606, 1713, 1820, 1927, 2034, 2141 };
+static void jent_rct_mem_init_ntg1(struct rand_data *ec)
 {
-	if (ec->osr >= ARRAY_SIZE(jent_rct_mem_cutoff_lookup_ntg1_startup)) {
-		ec->rct_mem_cutoff = jent_rct_mem_cutoff_lookup_ntg1_startup[
-			ARRAY_SIZE(jent_rct_mem_cutoff_lookup_ntg1_startup) - 1];
+	if (ec->osr >= ARRAY_SIZE(jent_rct_mem_cutoff_lookup_ntg1)) {
+		ec->rct_mem_cutoff = jent_rct_mem_cutoff_lookup_ntg1[
+			ARRAY_SIZE(jent_rct_mem_cutoff_lookup_ntg1) - 1];
 		ec->rct_mem_cutoff_permanent =
-			jent_rct_mem_cutoff_permanent_lookup_ntg1_startup[
-			ARRAY_SIZE(jent_rct_mem_cutoff_permanent_lookup_ntg1_startup) - 1];
+			jent_rct_mem_cutoff_permanent_lookup_ntg1[
+			ARRAY_SIZE(jent_rct_mem_cutoff_permanent_lookup_ntg1) - 1];
 	} else {
 		ec->rct_mem_cutoff =
-			jent_rct_mem_cutoff_lookup_ntg1_startup[ec->osr - 1];
+			jent_rct_mem_cutoff_lookup_ntg1[ec->osr - 1];
 		ec->rct_mem_cutoff_permanent =
-			jent_rct_mem_cutoff_permanent_lookup_ntg1_startup[ec->osr - 1];
+			jent_rct_mem_cutoff_permanent_lookup_ntg1[ec->osr - 1];
 	}
 }
 
-/* For NTG.1: 4-fold security margin during runtime */
-#if 0
-static const unsigned short jent_rct_mem_cutoff_lookup_ntg1_runtime[] =
-	{ 168,  384,  630,  888,  1151, 1417, 1684, 1952, 2221, 2490,
-	  2759, 3029, 3298, 3568, 3838, 4108, 4378, 4648, 4917, 5187 };
-#else
-#define jent_rct_mem_cutoff_lookup_ntg1_runtime                                \
-	jent_rct_mem_cutoff_permanent_lookup_ntg1_startup
-#endif
-static const unsigned short jent_rct_mem_cutoff_permanent_lookup_ntg1_runtime[] =
-	{ 192,  444,  708,  976,  1245, 1514, 1784, 2054, 2324, 2594,
-	  2864, 3134, 3404, 3674, 3944, 4214, 4484, 4754, 5024, 5294 };
-
-static void jent_rct_mem_init_ntg1_runtime(struct rand_data *ec)
-{
-	if (ec->osr >= ARRAY_SIZE(jent_rct_mem_cutoff_lookup_ntg1_runtime)) {
-		ec->rct_mem_cutoff = jent_rct_mem_cutoff_lookup_ntg1_runtime[
-			ARRAY_SIZE(jent_rct_mem_cutoff_lookup_ntg1_runtime) - 1];
-		ec->rct_mem_cutoff_permanent =
-			jent_rct_mem_cutoff_permanent_lookup_ntg1_runtime[
-			ARRAY_SIZE(jent_rct_mem_cutoff_permanent_lookup_ntg1_runtime) - 1];
-	} else {
-		ec->rct_mem_cutoff =
-			jent_rct_mem_cutoff_lookup_ntg1_runtime[ec->osr - 1];
-		ec->rct_mem_cutoff_permanent =
-			jent_rct_mem_cutoff_permanent_lookup_ntg1_runtime[ec->osr - 1];
-	}
-}
-
-static void jent_rct_mem_insert(struct rand_data *ec, int stuck)
+static void jent_rct_mem_insert(struct rand_data *ec, unsigned int stuck)
 {
 	/* Start of a new window */
-	if (ec->gen_loop_iter == 0)
+	if (ec->rct_mem_ctr == 0)
 		ec->rct_mem_count = 0;
 
-	if (stuck)
+	/*
+	 * If we are outside of a window, do not bother any more: the health
+	 * test will not be applied any more.
+	 *
+	 * We could simply return at this point if we leave the window, but then
+	 * we have a multi-modal behavior of the noise source, because if the
+	 * window is completed, a significant part of the code is not executed.
+	 * Therefore we apply a different strategy: always apply the health
+	 * test, but only set a health error if we are within the window.
+	 */
+#define JENT_RCT_MEM_IN_WINDOW	(ec->rct_mem_ctr < ec->rct_mem_nosr)
+
+	/*
+	 * According to the specification of this health test, we only consider
+	 * every third iteration count.
+	 *
+	 * Again, we could simply return here, but that would again imply a
+	 * multi-modal behavior. Therefore, always perform the health test
+	 * and turn it into a noop.
+	 */
+#define JENT_RCT_MEM_SKIP_STUCK (ec->rct_mem_ctr % 3)
+
+	/*
+	 * We have a stuck value, count it
+	 */
+	if (stuck && JENT_RCT_MEM_IN_WINDOW && !JENT_RCT_MEM_SKIP_STUCK)
 		ec->rct_mem_count++;
 
-	if ((unsigned int)ec->rct_mem_count >= ec->rct_mem_cutoff_permanent) {
-		ec->health_failure |= JENT_RCT_MEM_FAILURE_PERMANENT;
-	} else if ((unsigned int)ec->rct_mem_count == ec->rct_mem_cutoff) {
-		ec->health_failure |= JENT_RCT_MEM_FAILURE;
+	/*
+	 * Apply the cut off value.
+	 */
+	if (ec->rct_mem_count >= ec->rct_mem_cutoff_permanent) {
+		if (JENT_RCT_MEM_IN_WINDOW)
+			ec->health_failure |= JENT_RCT_MEM_FAILURE_PERMANENT;
+	} else if (ec->rct_mem_count == ec->rct_mem_cutoff) {
+		/*
+		 * This is a "recovery loop" to recover from expected false
+		 * positives of the health test. Note, the health test cutoffs
+		 * have a significantly higher false positive rate than the
+		 * APT and RCT. Therefore, this loop generates additional
+		 * random values to see whether no health test is detected
+		 * during this loop. If no health test error is seen, then
+		 * we incurred an expected spurious false positive that we
+		 * can ignore. The random data generated by that recovery
+		 * loop is simply added to the internal state and thus is not
+		 * wasted.
+		 */
+		if (!ec->in_recovery) {
+			unsigned int i;
+
+			/*
+			 * Clear the RCT with mem counter to generate fresh
+			 * data.
+			 */
+			ec->rct_mem_count = 0;
+			ec->in_recovery = 1;
+			for (i = 0; i < JENT_RCT_MEM_RECOVERY_LOOP_CNT; i++)
+				jent_random_data(ec);
+			ec->in_recovery = 0;
+
+			/*
+			 * We now leave the set health falures incurred from
+			 * the jent_random_data loop. If that loop did not
+			 * detect a failure, we have no failure at this point
+			 * either. Also, leave the rct_mem_count value as is.
+			 */
+		} else {
+			if (JENT_RCT_MEM_IN_WINDOW)
+				ec->health_failure |= JENT_RCT_MEM_FAILURE;
+		}
 	}
+
+	/*
+	 * Count up the seen measurements if we are in the window - this
+	 * prevents also a wrap-around.
+	 */
+	if (JENT_RCT_MEM_IN_WINDOW)
+		ec->rct_mem_ctr++;
+}
+
+void jent_rct_mem_duplicate(struct rand_data *new_ec, struct rand_data *old_ec)
+{
+	new_ec->rct_mem_count = old_ec->rct_mem_cutoff;
 }
 
 /***************************************************************************
@@ -567,10 +635,22 @@ static void jent_rct_init(struct rand_data *ec, unsigned short safety)
 
 	if (safety) {
 		ec->rct_cutoff = (unsigned short)
-			(ec->rct_cutoff + safety - 1) / safety;
+			((ec->rct_cutoff + safety - 1) / safety);
 		ec->rct_cutoff_permanent = (unsigned short)
-			(ec->rct_cutoff_permanent + safety - 1) / safety;
+			((ec->rct_cutoff_permanent + safety - 1) / safety);
 	}
+}
+
+void jent_rct_duplicate(struct rand_data *new_ec)
+{
+	/*
+	 * RCT re-initialization to intermittent error: As during a reset,
+	 * the OSR is updated and the OSR is at the same time the cutoff for
+	 * the RCT, we re-initialize the new RCT to the intermittent error
+	 * value based on the new OSR.
+	 */
+	new_ec->rct_count =
+		(unsigned int)(JENT_HEALTH_RCT_INTERMITTENT_CUTOFF(new_ec->osr));
 }
 
 /**
@@ -579,14 +659,14 @@ static void jent_rct_init(struct rand_data *ec, unsigned short safety)
  * @param[in] ec Reference to entropy collector
  * @param[in] stuck Indicator whether the value is stuck
  */
-static void jent_rct_insert(struct rand_data *ec, int stuck)
+static void jent_rct_insert(struct rand_data *ec, unsigned int stuck)
 {
 	if (stuck) {
 		ec->rct_count++;
 
-		if ((unsigned int)ec->rct_count >= ec->rct_cutoff_permanent) {
+		if (ec->rct_count >= ec->rct_cutoff_permanent) {
 			ec->health_failure |= JENT_RCT_FAILURE_PERMANENT;
-		} else if ((unsigned int)ec->rct_count == ec->rct_cutoff) {
+		} else if (ec->rct_count == ec->rct_cutoff) {
 			ec->health_failure |= JENT_RCT_FAILURE;
 		}
 	} else {
@@ -614,6 +694,7 @@ unsigned int jent_stuck(struct rand_data *ec, uint64_t current_delta)
 {
 	uint64_t delta2 = jent_delta2(ec, current_delta);
 	uint64_t delta3 = jent_delta3(ec, delta2);
+	unsigned int stuck = !current_delta || !delta2 || !delta3;
 
 	/*
 	 * Insert the result of the comparison of two back-to-back time
@@ -622,18 +703,11 @@ unsigned int jent_stuck(struct rand_data *ec, uint64_t current_delta)
 	jent_apt_insert(ec, current_delta);
 	jent_lag_insert(ec, current_delta);
 
-	if (!current_delta || !delta2 || !delta3) {
-		/* RCT with a stuck bit */
-		jent_rct_insert(ec, 1);
-		jent_rct_mem_insert(ec, 1);
-		return 1;
-	}
+	/* RCT with stuck result */
+	jent_rct_insert(ec, stuck);
+	jent_rct_mem_insert(ec, stuck);
 
-	/* RCT with a non-stuck bit */
-	jent_rct_insert(ec, 0);
-	jent_rct_mem_insert(ec, 0);
-
-	return 0;
+	return stuck;
 }
 
 /**
@@ -677,15 +751,10 @@ void jent_health_init(struct rand_data *ec, enum jent_health_init_type inittype)
 	ec->rct_count = 0;
 	jent_lag_init(ec, ec->osr);
 	switch (inittype) {
-	case jent_health_init_type_ntg1_startup:
-		jent_apt_init_ntg1_startup(ec);
+	case jent_health_init_type_ntg1:
+		jent_apt_init_ntg1(ec);
 		jent_rct_init(ec, 8);
-		jent_rct_mem_init_ntg1_startup(ec);
-		break;
-	case jent_health_init_type_ntg1_runtime:
-		jent_apt_init_ntg1_runtime(ec);
-		jent_rct_init(ec, 4);
-		jent_rct_mem_init_ntg1_runtime(ec);
+		jent_rct_mem_init_ntg1(ec);
 		break;
 	case jent_health_init_type_common:
 	default:

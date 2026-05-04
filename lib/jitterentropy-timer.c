@@ -1,6 +1,6 @@
 /* Jitter RNG: Internal timer implementation
  *
- * Copyright (C) 2021 - 2025, Stephan Mueller <smueller@chronox.de>
+ * Copyright (C) 2021 - 2026, Stephan Mueller <smueller@chronox.de>
  *
  * License: see LICENSE file in root directory
  *
@@ -54,9 +54,9 @@ int jent_notime_init(void **ctx)
 	if (ncpu < 2)
 		return -ENOENT;
 
-	thread_ctx = calloc(1, sizeof(struct jent_notime_ctx));
+	thread_ctx = jent_zalloc(sizeof(struct jent_notime_ctx));
 	if (!thread_ctx)
-		return -errno;
+		return -ENOMEM;
 
 	*ctx = thread_ctx;
 
@@ -69,7 +69,7 @@ void jent_notime_fini(void *ctx)
 	struct jent_notime_ctx *thread_ctx = (struct jent_notime_ctx *)ctx;
 
 	if (thread_ctx)
-		free(thread_ctx);
+		jent_zfree(thread_ctx, sizeof(struct jent_notime_ctx));
 }
 
 #else /* JENT_CONF_ENABLE_INTERNAL_TIMER */
@@ -124,6 +124,10 @@ static int jent_notime_start(void *ctx,
 static void jent_notime_stop(void *ctx)
 {
 	struct jent_notime_ctx *thread_ctx = (struct jent_notime_ctx *)ctx;
+
+	/* defensive check */
+	if (ctx == NULL)
+		return;
 
 #ifdef JENT_PTHREAD
 	pthread_join(thread_ctx->notime_thread_id, NULL);

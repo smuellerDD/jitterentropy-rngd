@@ -1,7 +1,7 @@
 /*
  * Non-physical true random number generator based on timing jitter.
  *
- * Copyright Stephan Mueller <smueller@chronox.de>, 2014 - 2025
+ * Copyright Stephan Mueller <smueller@chronox.de>, 2014 - 2026
  *
  * License
  * =======
@@ -59,7 +59,7 @@ extern "C" {
  *
  * It is allowed to change this value as required for the intended environment.
  */
-#define JENT_STUCK_INIT_THRES(x) ((x*9) / 10)
+#define JENT_STUCK_INIT_THRES(x) (((x) * 9) / 10)
 #endif
 
 /***************************************************************************
@@ -320,7 +320,7 @@ struct rand_data
 	unsigned int hashloopcnt;	/* Hash loop count */
 
 	/* Repetition Count Test */
-	int rct_count;			/* Number of stuck values */
+	unsigned int rct_count;		/* Number of stuck values */
 	unsigned short rct_cutoff;	/* RCT intermittent cutoff */
 	unsigned short rct_cutoff_permanent; /* RCT permanent cutoff */
 
@@ -337,8 +337,9 @@ struct rand_data
 	unsigned int health_failure;	/* Permanent health failure */
 
 	/* RCT with memory */
+	unsigned short rct_mem_ctr;	/* Loop iteration for generating random bytes */
+	unsigned short rct_mem_nosr;	/* Minimum iteration count of measure jitter loop */
 	unsigned short rct_mem_count;	/* Number of stuck values */
-	unsigned short gen_loop_iter;	/* Loop iteration for generating random bytes */
 	unsigned short rct_mem_cutoff;	/* RCT intermittent cutoff */
 	unsigned short rct_mem_cutoff_permanent; /* RCT permanent cutoff */
 
@@ -346,6 +347,7 @@ struct rand_data
 	unsigned int fips_enabled:1;
 	unsigned int enable_notime:1;	/* Use internal high-res timer */
 	unsigned int max_mem_set:1;	/* Maximum memory configured by user */
+	unsigned int in_recovery:1;	/* Flag to indicate a recovery op. */
 
 #ifdef JENT_CONF_ENABLE_INTERNAL_TIMER
 	volatile uint8_t notime_interrupt;	/* indicator to interrupt ctr */

@@ -1,7 +1,7 @@
 /* Jitter RNG: GCD health test
  *
- * Copyright (C) 2021 - 2025, Joshua E. Hill <josh@keypair.us>
- * Copyright (C) 2021 - 2025, Stephan Mueller <smueller@chronox.de>
+ * Copyright (C) 2021 - 2026, Joshua E. Hill <josh@keypair.us>
+ * Copyright (C) 2021 - 2026, Stephan Mueller <smueller@chronox.de>
  *
  * License: see LICENSE file in root directory
  *
@@ -144,8 +144,7 @@ uint64_t *jent_gcd_init(size_t nelem)
 void jent_gcd_fini(uint64_t *delta_history, size_t nelem)
 {
 	if (delta_history)
-		jent_zfree(delta_history,
-			   (unsigned int)(nelem * sizeof(uint64_t)));
+		jent_zfree(delta_history, nelem * sizeof(uint64_t));
 }
 
 int jent_gcd_get(uint64_t *value)

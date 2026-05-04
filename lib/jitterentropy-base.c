@@ -1,7 +1,7 @@
 /*
  * Non-physical true random number generator based on timing jitter.
  *
- * Copyright Stephan Mueller <smueller@chronox.de>, 2014 - 2025
+ * Copyright Stephan Mueller <smueller@chronox.de>, 2014 - 2026
  *
  * Design
  * ======
@@ -244,12 +244,27 @@ static inline unsigned int jent_update_hashloop(unsigned int flags,
 JENT_PRIVATE_STATIC
 ssize_t jent_read_entropy(struct rand_data *ec, char *data, size_t len)
 {
+	/*
+	 * Maximum value representable by ssize_t. Use a portable
+	 * definition in case SSIZE_MAX is not available under strict
+	 * C standard modes. It is nevertheless available on POSIX systems.
+	 */
+	static const size_t ssize_max = (size_t)(((size_t)1 << (sizeof(ssize_t) * 8 - 1)) - 1);
 	char *p = data;
-	size_t orig_len = len;
+	size_t orig_len;
 	int ret = 0;
 
-	if (NULL == ec)
+	/* check obvious misuse of API */
+	if (!ec || (data == NULL && len > 0))
 		return -1;
+
+	/*
+	 * (hypothetical) edge case: clamp to ssize_t range to prevent
+	 * negative return on cast
+	 */
+	if (len > ssize_max)
+		len = ssize_max;
+	orig_len = len;
 
 	if (jent_notime_settick(ec))
 		return -4;
@@ -331,27 +346,14 @@ static int jent_health_failure_reset(
 	struct rand_data **ec, struct rand_data *(*alloc)(unsigned int osr,
 							  unsigned int flags))
 {
-	unsigned int osr, flags, max_mem_set, apt_observations = 0,
-		     lag_prediction_success_run, lag_prediction_success_count;
-	uint64_t current_delta;
-
-	/* Remember all health test state */
-	apt_observations = (*ec)->apt_observations;
-	current_delta = (*ec)->apt_base;
-#ifdef JENT_HEALTH_LAG_PREDICTOR
-	lag_prediction_success_run = (*ec)->lag_prediction_success_run;
-	lag_prediction_success_count = (*ec)->lag_prediction_success_count;
-#else
-	(void)lag_prediction_success_run;
-	(void)lag_prediction_success_count;
-#endif
+	struct rand_data *new_ec;
+	unsigned int osr, flags;
 
 	/* Increment OSR */
 	osr = (*ec)->osr + 1;
 
 	/* Remember flags value */
 	flags = (*ec)->flags;
-	max_mem_set = (*ec)->max_mem_set;
 
 	/* generic arbitrary cutoff to prevent running "forever" */
 	if (osr > JENT_MAX_OSR)
@@ -361,15 +363,11 @@ static int jent_health_failure_reset(
 	 * If the caller did not set any specific maximum value let the Jitter
 	 * RNG increase the maximum memory by one step.
 	 */
-	if (!max_mem_set)
+	if (!(*ec)->max_mem_set)
 		flags = jent_update_memsize(flags, 1);
 
 	/* Increment hash loop count by one */
 	flags = jent_update_hashloop(flags, 1);
-
-	/* re-allocate entropy collector with higher OSR and memory size */
-	jent_entropy_collector_free(*ec);
-	*ec = NULL;
 
 	/* Perform new health test with updated OSR */
 	while (jent_entropy_init_ex(osr, flags)) {
@@ -378,32 +376,29 @@ static int jent_health_failure_reset(
 			return -1;
 	}
 
-	*ec = alloc(osr, flags);
-	if (!*ec)
+	new_ec = alloc(osr, flags);
+
+	/*
+	 * In case of an error, leave the existing ec state untouched as a
+	 * safety measure. But it is in error state and is of not much use.
+	 */
+	if (!new_ec)
 		return -1;
 
 	/* Remember whether caller configured memory size */
-	(*ec)->max_mem_set = !!max_mem_set;
+	new_ec->max_mem_set = !!(*ec)->max_mem_set;
 
-	/* Set the health test state in case of intermittent failures. */
-	if (apt_observations) {
-		/* APT re-initialization to intermittent error */
-		jent_apt_reinit(*ec, current_delta, 0, apt_observations);
+	/*
+	 * Duplicate the state of the health tests to ensure the newly allocated
+	 * state will continue from the current health state.
+	 */
+	jent_apt_duplicate(new_ec, *ec);
+	jent_rct_duplicate(new_ec);
+	jent_lag_duplicate(new_ec, *ec);
+	jent_rct_mem_duplicate(new_ec, *ec);
 
-		/* RCT re-initialization to intermittent error */
-		(*ec)->rct_count =
-			(int)(JENT_HEALTH_RCT_INTERMITTENT_CUTOFF(osr));
-
-		/* LAG re-initialization */
-#ifdef JENT_HEALTH_LAG_PREDICTOR
-		(*ec)->lag_prediction_success_run = lag_prediction_success_run;
-		(*ec)->lag_prediction_success_count =
-			lag_prediction_success_count;
-#endif
-
-		/* RCT with memory re-initialization to intermittent error */
-		(*ec)->rct_mem_count = (*ec)->rct_mem_cutoff;
-	}
+	jent_entropy_collector_free(*ec);
+	*ec = new_ec;
 
 	return 0;
 }
@@ -426,23 +421,38 @@ static struct rand_data *_jent_entropy_collector_alloc(unsigned int osr,
  * is not safe to be used on the current system.
  *
  * @param[in] ec Reference to entropy collector - this is a double pointer as
- *	    The entropy collector may be freed and reallocated.
+ *	    	 The entropy collector may be freed and reallocated.
  * @param[out] data pointer to buffer for storing random data -- buffer must
- *	       already exist
- * @param[in] len size of the buffer, specifying also the requested number of random
- *	     in bytes
+ *	      	    already exist
+ * @param[in] len size of the buffer, specifying also the requested number of
+ *		  random in bytes
  *
  * @return see jent_read_entropy()
  */
 JENT_PRIVATE_STATIC
 ssize_t jent_read_entropy_safe(struct rand_data **ec, char *data, size_t len)
 {
+	/*
+	 * Maximum value representable by ssize_t. Use a portable
+	 * definition in case SSIZE_MAX is not available under strict
+	 * C standard modes. It is nevertheless available on POSIX systems.
+	 */
+	static const size_t ssize_max = (size_t)(((size_t)1 << (sizeof(ssize_t) * 8 - 1)) - 1);
 	char *p = data;
-	size_t orig_len = len;
+	size_t orig_len;
 	ssize_t ret = 0;
 
-	if (!ec)
+	/* check obvious misuse of API */
+	if (!ec || (data == NULL && len > 0))
 		return -1;
+
+	/*
+	 * (hypothetical) edge case: clamp to ssize_t range to prevent
+	 * negative return on cast
+	 */
+	if (len > ssize_max)
+		len = ssize_max;
+	orig_len = len;
 
 	while (len > 0) {
 		ret = jent_read_entropy(*ec, p, len);
@@ -549,6 +559,12 @@ static struct rand_data
 	 */
 	osr = ensure_osr_is_at_least_minimal(osr);
 
+	/*
+	 * Reject too high OSR
+	 */
+	if (osr > JENT_MAX_OSR)
+		return NULL;
+
 	/* Force the self test to be run */
 	if (!jent_selftest_run && jent_entropy_init_ex(osr, flags))
 		return NULL;
@@ -575,14 +591,14 @@ static struct rand_data
 		flags = jent_update_memsize(flags, 0);
 		memsize = jent_memsize(flags);
 		entropy_collector->mem = (unsigned char *)jent_zalloc(memsize);
+		if (entropy_collector->mem == NULL)
+			goto err;
 
 		/*
 		 * Transform the size into a mask - it is assumed that size is
 		 * a power of 2.
 		 */
 		entropy_collector->memmask = memsize - 1;
-		if (entropy_collector->mem == NULL)
-			goto err;
 		entropy_collector->memaccessloops = JENT_MEM_ACC_LOOP_DEFAULT;
 	}
 
@@ -629,7 +645,7 @@ static struct rand_data
 
 	/* Initialize the health tests */
 	jent_health_init(entropy_collector, flags & JENT_NTG1 ?
-					    jent_health_init_type_ntg1_startup :
+					    jent_health_init_type_ntg1 :
 					    jent_health_init_type_common);
 
 	/* Was jent_entropy_init run (establishing the common GCD)? */
@@ -705,6 +721,21 @@ static struct rand_data *_jent_entropy_collector_alloc(unsigned int osr,
 				return NULL;
 			}
 
+			/*
+			 * The reset replaced ec with a freshly allocated
+			 * collector. That new collector has enable_notime
+			 * set but no running timer thread (the old thread
+			 * was stopped when the old collector was freed).
+			 * Restart the timer thread before re-entering the
+			 * loop, otherwise jent_get_nstime_internal will
+			 * spin forever waiting for a counter that nobody
+			 * increments.
+			 */
+			if (jent_notime_settick(ec)) {
+				jent_entropy_collector_free(ec);
+				return NULL;
+			}
+
 			/* Rerun startup sequence */
 			continue;
 		}
@@ -761,11 +792,6 @@ int jent_time_entropy_init(unsigned int osr, unsigned int flags)
 	uint64_t *delta_history;
 	int i, time_backwards = 0, count_stuck = 0, ret = 0;
 	unsigned int health_test_result;
-
-	/*
-	 * Ensure over sampling rate is not too low.
-	 */
-	osr = ensure_osr_is_at_least_minimal(osr);
 
 	delta_history = jent_gcd_init(JENT_POWERUP_TESTLOOPCOUNT);
 	if (!delta_history)
@@ -832,7 +858,7 @@ int jent_time_entropy_init(unsigned int osr, unsigned int flags)
 		 * delta even when called shortly after each other -- this
 		 * implies that we also have a high resolution timer
 		 */
-		if (!delta || (end_time == start_time)) {
+		if (!delta) {
 			ret = ECOARSETIME;
 			goto out;
 		}
@@ -876,7 +902,8 @@ int jent_time_entropy_init(unsigned int osr, unsigned int flags)
 		goto out;
 	}
 
-	ret = jent_gcd_analyze(delta_history, JENT_POWERUP_TESTLOOPCOUNT, osr);
+	ret = jent_gcd_analyze(delta_history, JENT_POWERUP_TESTLOOPCOUNT,
+			       ec->osr);
 	if (ret)
 		goto out;
 
@@ -925,6 +952,13 @@ static inline int jent_entropy_init_common_post(int ret)
 	return ret;
 }
 
+/*
+ * Note: This function and jent_entropy_init_ex() are NOT thread-safe.
+ * They modify global state (GCD, self-test flag, notime configuration).
+ * The caller must ensure that initialization is performed exactly once
+ * before any concurrent use of the library (e.g. via pthread_once or
+ * equivalent).
+ */
 JENT_PRIVATE_STATIC
 int jent_entropy_init(void)
 {
