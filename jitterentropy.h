@@ -98,8 +98,8 @@ extern "C" {
 
 /* Flags field limiting the amount of memory to be used for memory access */
 #define JENT_FLAGS_TO_MEMSIZE_SHIFT	27
-#define JENT_FLAGS_TO_MAX_MEMSIZE(val)	(val >> JENT_FLAGS_TO_MEMSIZE_SHIFT)
-#define JENT_MAX_MEMSIZE_TO_FLAGS(val)	(val << JENT_FLAGS_TO_MEMSIZE_SHIFT)
+#define JENT_FLAGS_TO_MAX_MEMSIZE(val)	((val) >> JENT_FLAGS_TO_MEMSIZE_SHIFT)
+#define JENT_MAX_MEMSIZE_TO_FLAGS(val)	((val) << JENT_FLAGS_TO_MEMSIZE_SHIFT)
 #define JENT_MAX_MEMSIZE_1kB		JENT_MAX_MEMSIZE_TO_FLAGS(UINT32_C( 1))
 #define JENT_MAX_MEMSIZE_2kB		JENT_MAX_MEMSIZE_TO_FLAGS(UINT32_C( 2))
 #define JENT_MAX_MEMSIZE_4kB		JENT_MAX_MEMSIZE_TO_FLAGS(UINT32_C( 3))
@@ -130,10 +130,10 @@ extern "C" {
 
 /* Flags field defining the hash loop */
 #define JENT_FLAGS_TO_HASHLOOP_SHIFT	24
-#define JENT_HASHLOOP_TO_FLAGS(val)	(val << JENT_FLAGS_TO_HASHLOOP_SHIFT)
+#define JENT_HASHLOOP_TO_FLAGS(val)	((val) << JENT_FLAGS_TO_HASHLOOP_SHIFT)
 #define JENT_MAX_HASHLOOP_MASK		JENT_HASHLOOP_TO_FLAGS(0x7)
-#define JENT_FLAGS_TO_HASHLOOP(val)	((val >> JENT_FLAGS_TO_HASHLOOP_SHIFT) &\
-					 0x7)
+#define JENT_FLAGS_TO_HASHLOOP(val)	(((val) >> JENT_FLAGS_TO_HASHLOOP_SHIFT)\
+					 & 0x7)
 #define JENT_HASHLOOP_1			JENT_HASHLOOP_TO_FLAGS(UINT32_C(0))
 #define JENT_HASHLOOP_2			JENT_HASHLOOP_TO_FLAGS(UINT32_C(1))
 #define JENT_HASHLOOP_4			JENT_HASHLOOP_TO_FLAGS(UINT32_C(2))
@@ -154,7 +154,7 @@ extern "C" {
 #endif
 #endif
 
-#if defined(__MINGW32__) || defined(__APPLE__)
+#if defined(__MINGW32__) || defined(__APPLE__) || defined(__OpenBSD__) || defined(__FreeBSD__) || defined(__NetBSD__)
 #define JENT_PTHREAD
 #endif
 
@@ -289,7 +289,7 @@ void jent_notime_fini(void *ctx);
 #define JENT_LAG_FAILURE	4 /* Failure in Lag predictor health test. */
 #define JENT_RCT_MEM_FAILURE	8 /* Failure in RCT with memory health test. */
 #define JENT_PERMANENT_FAILURE_SHIFT	16
-#define JENT_PERMANENT_FAILURE(x)	(x << JENT_PERMANENT_FAILURE_SHIFT)
+#define JENT_PERMANENT_FAILURE(x)	((x) << JENT_PERMANENT_FAILURE_SHIFT)
 #define JENT_RCT_FAILURE_PERMANENT	JENT_PERMANENT_FAILURE(JENT_RCT_FAILURE)
 #define JENT_APT_FAILURE_PERMANENT	JENT_PERMANENT_FAILURE(JENT_APT_FAILURE)
 #define JENT_LAG_FAILURE_PERMANENT	JENT_PERMANENT_FAILURE(JENT_LAG_FAILURE)
