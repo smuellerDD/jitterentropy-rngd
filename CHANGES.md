@@ -1,3 +1,6 @@
+1.3.1:
+ * Fix incomplete merger with Jitter RNG 3.7.0 library
+
 1.3.0:
  * enhancement: use Jitter RNG library 3.7.0
  * enhancement: inject data into Linux RNG where the Linux RNG operates as
