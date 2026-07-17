@@ -566,33 +566,35 @@ static ssize_t gather_entropy(struct kernel_rng *rng, int init)
 		 * The LRNG operates fully 90B compliant, no special handling
 		 * is necessary.
 		 */
-		if (read_jent(rng, buf, buflen) < 0)
-			return 0;
+		ret = read_jent(rng, buf, buflen);
+		if (ret < 0)
+			goto out;
 
 		dolog(LOG_DEBUG, "LRNG: Inject %u bits of data with %u bits of entropy into Blake2S state",
-		      buflen << 3, buflen << 3);
+		      buflen << 3, ret << 3);
 
 		/*
 		 * Write the entropy, LRNG seeds automatically - the Jitter RNG
 		 * provides full entropy so, we tell the Linux RNG the amount of
 		 * entropy.
 		 */
-		ret = write_random(rng, buf, buflen, buflen, 0);
+		ret = write_random(rng, buf, buflen, ret, 0);
 	} else if (kernver_ge(5, 18, 0)) {
 		/*
 		 * AIS 20/31 DRT.1, no special handling is necessary.
 		 */
-		if (read_jent(rng, buf, buflen) < 0)
-			return 0;
+		ret = read_jent(rng, buf, buflen);
+		if (ret < 0)
+			goto out;
 
 		dolog(LOG_DEBUG, "Linux kernel >= 5.18: Inject %u bits of data with %u bits of entropy into Blake2S state",
-		      buflen << 3, buflen << 3);
+		      buflen << 3, ret << 3);
 
 		/*
 		 * Write the entropy and trigger reseed - the Jitter RNG provides
 		 * full entropy so, we tell the Linux RNG the amount of entropy.
 		 */
-		ret = write_random(rng, buf, buflen, buflen, 1);
+		ret = write_random(rng, buf, buflen, ret, 1);
 	} else if (kernver_ge(4, 17, 0)) {
 		unsigned int numblocks = 1, i;
 
@@ -605,8 +607,9 @@ static ssize_t gather_entropy(struct kernel_rng *rng, int init)
 		 * Generate twice the entropy data, once for the input_pool
 		 * and once for ChaCha20.
 		 */
-		if (read_jent(rng, buf, buflen) < 0)
-			return 0;
+		ret = read_jent(rng, buf, buflen);
+		if (ret < 0)
+			goto out;
 
 		dolog(LOG_DEBUG, "Linux kernel >= 4.17: Inject entropy into %s",
 		      force_sp80090b ? "ChaCha20 DRNG" : "input pool");
@@ -623,8 +626,9 @@ static ssize_t gather_entropy(struct kernel_rng *rng, int init)
 		if (force_sp80090b)
 			buflen = SHA1_FOLD_OUTPUT_SIZE;
 
-		if (read_jent(rng, buf, buflen) < 0)
-			return 0;
+		ret = read_jent(rng, buf, buflen);
+		if (ret < 0)
+			goto out;
 
 		dolog(LOG_DEBUG, "Fallback case: Inject %u bits of data with %u bits of entropy into Blake2S state",
 		      buflen << 3, (buflen / OVERSAMPLINGFACTOR) << 3);
@@ -638,6 +642,8 @@ static ssize_t gather_entropy(struct kernel_rng *rng, int init)
 		      ret, rng->dev, buflen);
 		ret = 0;
 	}
+
+out:
 	memset_secure(buf, 0, buflen);
 
 	sigprocmask(SIG_SETMASK, &previous_set, NULL);
