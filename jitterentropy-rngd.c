@@ -894,7 +894,7 @@ static int alloc_rng(struct kernel_rng *rng)
 static int alloc(void)
 {
 	int ret = 0;
-	size_t written = 0;
+	ssize_t written = 0;
 
 	ret = jent_entropy_init_ex(jent_osr, jent_flags);
 	if (ret) {
@@ -925,7 +925,13 @@ static int alloc(void)
 	}
 
 	written = gather_entropy(&Random, 1);
-	dolog(LOG_VERBOSE, "%lu bytes written to /dev/random", written);
+	if (written >= 0) {
+		dolog(LOG_VERBOSE, "%zd bytes to /dev/random", written);
+	} else {
+		dolog(LOG_ERR, "Cannot write to /dev/random, failure: %zd",
+		      written);
+		/* We consider this as no error at this point */
+	}
 
 	return 0;
 }
