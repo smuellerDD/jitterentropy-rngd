@@ -64,12 +64,27 @@
 #define MINVERSION 3 /* API compatible, ABI may change, functional
 		      * enhancements only, consumer can be left unchanged if
 		      * enhancements are not considered */
-#define PATCHLEVEL 1 /* API / ABI compatible, no functional changes, no
+#define PATCHLEVEL 2 /* API / ABI compatible, no functional changes, no
 		      * enhancements, bug fixes only */
 
 static int Verbosity = 0;
 static int force_sp80090b = 0;
 static int status = 0;
+
+/*
+ * When set, the daemon will exit on any error it encounters. The goal is that
+ * a wrapping monitor will pick up the errors and handle it as it sees fit, such
+ * as creating audit logs and possibly restart the daemon.
+ *
+ * The following errors are returned:
+ *
+ * * EOPNOTSUPP - the Jitter RNG triggered a fatal health test error
+ * * Errors reported by IOCTLs of RNDADDENTROPY and RNDRESEEDCRNG to /dev/random
+ * * Errors triggered by system calls including select(2), open(2), truncate(2),
+ *   write(2), fork(2), as well as errors from library functions including
+ *   lockf(3).
+ */
+static int exit_on_error = 0;
 
 struct kernel_rng {
 	int fd;
@@ -123,6 +138,7 @@ static unsigned int jent_osr = 1;
 
 static void install_alarm(unsigned int secs);
 static void dealloc(void);
+static int alloc(void);
 static void dealloc_rng(struct kernel_rng *rng);
 
 static unsigned long kern_maj = ULONG_MAX, kern_minor, kern_patchlevel;
@@ -230,6 +246,7 @@ static void usage(void)
 	fprintf(stderr, "\t-o --osr\tInteger with OSR used to allocate Jitter RNG\n");
 	fprintf(stderr, "\t   --status\tStatus information of the Jitter RNG - invoke with\n");
 	fprintf(stderr, "\t           \tsame flags as used for runtime\n");
+	fprintf(stderr, "\t   --exit-on-error\tCause the daemon to exit on errors\n");
 	fprintf(stderr, "\nLRNG presence %sdetected\n",
 		lrng_present() ? "" : "not ");
 	exit(1);
@@ -251,6 +268,7 @@ static void parse_opts(int argc, char *argv[])
 			{"flags", 1, 0, 0},
 			{"osr", 1, 0, 0},
 			{"status", 0, 0, 0},
+			{"exit-on-error", 0, 0, 0},
 			{0, 0, 0, 0}
 		};
 		c = getopt_long(argc, argv, "svp:hf:o:", opts, &opt_index);
@@ -315,6 +333,11 @@ static void parse_opts(int argc, char *argv[])
 			/* status */
 			case 7:
 				status = 1;
+				break;
+
+			/* exit-on-error */
+			case 8:
+				exit_on_error = 1;
 				break;
 
 			default:
@@ -446,6 +469,7 @@ static ssize_t write_random(struct kernel_rng *rng, char *buf, size_t len,
 	 */
 	if (force_reseed && kernver_ge(4, 17, 0) && !lrng_present()) {
 		if (ioctl(rng->fd, RNDRESEEDCRNG) < 0) {
+			written = errno;
 			if (errno == EINVAL)
 				goto out;
 			dolog(LOG_WARN,
@@ -535,7 +559,7 @@ static ssize_t read_jent(struct kernel_rng *rng, char *buf, size_t buflen)
 
 	dolog(LOG_WARN, "Cannot read entropy");
 
-	return -EFAULT;
+	return -EOPNOTSUPP;
 }
 
 static ssize_t gather_entropy(struct kernel_rng *rng, int init)
@@ -646,6 +670,12 @@ static ssize_t gather_entropy(struct kernel_rng *rng, int init)
 out:
 	memset_secure(buf, 0, buflen);
 
+	if (exit_on_error && ret < 0) {
+		/* We now exit as requested by caller */
+		dealloc();
+		exit(-ret);
+	}
+
 	sigprocmask(SIG_SETMASK, &previous_set, NULL);
 
 	return ret;
@@ -682,8 +712,6 @@ static int read_entropy_value(int fd)
 /*******************************************************************
  * Signal handling functions
  *******************************************************************/
-static void dealloc(void);
-static int alloc(void);
 
 /*
  * Wakeup and check entropy_avail -- this covers the drain of entropy
@@ -778,8 +806,15 @@ static void select_fd(void)
 		/* only /dev/random implements polling */
 		ret = select((Random.fd + 1), NULL, &fds, NULL, NULL);
 
-		if (-1 == ret && EINTR != errno)
+		if (-1 == ret && EINTR != errno) {
+			if (exit_on_error) {
+				int errsv = errno;
+
+				dealloc();
+				exit(errsv);
+			}
 			dolog(LOG_ERR, "Select returned with error %s", strerror(errno));
+		}
 		if (0 <= ret) {
 			dolog(LOG_VERBOSE, "Wakeup call for select on /dev/random");
 			do {
@@ -953,15 +988,19 @@ static void create_pid_file(const char *pid_file)
 
 	if (lockf(Pidfile_fd, F_TLOCK, 0) == -1) {
 		if (errno == EAGAIN || errno == EACCES) {
+			int errsv = errno;
+
 			dolog(LOG_ERR, "PID file already locked\n");
-			exit(1);
+			exit(errsv);
 		} else
 			dolog(LOG_ERR, "Cannot lock pid file\n");
 	}
 
 	if (ftruncate(Pidfile_fd, 0) == -1) {
+		int errsv = errno;
+
 		dolog(LOG_ERR, "Cannot truncate pid file\n");
-		exit(1);
+		exit(errsv);
 	}
 
 	/* write our pid to the pid file */
@@ -988,7 +1027,7 @@ static void daemonize(void)
 	/* the parent process exits -- nothing has been allocated, nothing
 	 * needs to be freed */
 	if (0 < pid)
-            exit(0);
+		exit(0);
 
 	/* we are the child now */
 

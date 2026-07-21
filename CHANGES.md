@@ -1,3 +1,6 @@
+1.3.2:
+ * Add --exit-on-error option
+
 1.3.1:
  * Fix incomplete merger with Jitter RNG 3.7.0 library
 
