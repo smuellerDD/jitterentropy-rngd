@@ -469,7 +469,7 @@ static ssize_t write_random(struct kernel_rng *rng, char *buf, size_t len,
 	 */
 	if (force_reseed && kernver_ge(4, 17, 0) && !lrng_present()) {
 		if (ioctl(rng->fd, RNDRESEEDCRNG) < 0) {
-			written = errno;
+			written = -errno;
 			if (errno == EINVAL)
 				goto out;
 			dolog(LOG_WARN,
