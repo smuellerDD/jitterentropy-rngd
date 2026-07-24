@@ -485,62 +485,6 @@ out:
 	return written;
 }
 
-/*
- * Inject the data 90B-compliant considering the minimum n_out of 80 bits
- * of the folded SHA-1 operation reading the input_pool.
- *
- * The following seeding strategy is applied to ensure SP800-90B compliance:
- *
- * - If the LRNG is present, 90B compliance is always given and no special
- * handling is needed.
- *
- * - If the default /dev/random implementation is provided and the kernel offers
- * the RNDRESEEDCRNG, use it after injecting 80 bits of entropy to feed
- * the entropy into the ChaCha20 DRNG. In this case, the caller should use
- * the getrandom(2) system call or /dev/urandom to get SP800-90B compliant
- * data.
- *
- * - Kernels without the RNDRESEEDCRNG will never offer SP800-90B compliant
- * data via /dev/urandom or getrandom(2). Those should always use /dev/random.
- * In this case, the Jitter-RNG will feed only 80 bit chunks into the kernel.
- * This means that after /dev/random consumed 80 bits, new data is requested
- * from the Jitter-RNG.
- */
-#define SHA1_FOLD_OUTPUT_SIZE	10
-static ssize_t write_random_90B(struct kernel_rng *rng, char *buf, size_t len,
-				size_t entropy_bytes, int force_reseed)
-{
-	size_t written = 0, ptr;
-
-	if (!force_reseed)
-		return write_random(rng, buf, len, entropy_bytes, force_reseed);
-
-	if (len > SSIZE_MAX)
-		return -EOVERFLOW;
-
-	for (ptr = 0; ptr < len; ptr += SHA1_FOLD_OUTPUT_SIZE) {
-		size_t todo = len - ptr, ent;
-		ssize_t out;
-
-		if (todo > SHA1_FOLD_OUTPUT_SIZE)
-			todo = SHA1_FOLD_OUTPUT_SIZE;
-
-		ent = todo;
-		if (ent > entropy_bytes)
-			ent = entropy_bytes;
-		entropy_bytes -= ent;
-
-		out = write_random(rng, buf + ptr, todo, ent, force_reseed);
-
-		if (out < 0)
-			return out;
-
-		written += out;
-	}
-
-	return written;
-}
-
 static ssize_t read_jent(struct kernel_rng *rng, char *buf, size_t buflen)
 {
 	ssize_t ret;
@@ -562,7 +506,7 @@ static ssize_t read_jent(struct kernel_rng *rng, char *buf, size_t buflen)
 	return -EOPNOTSUPP;
 }
 
-static ssize_t gather_entropy(struct kernel_rng *rng, int init)
+static ssize_t gather_entropy(struct kernel_rng *rng)
 {
 	sigset_t blocking_set, previous_set;
 #define ENTBLOCKSIZE	(ENTROPYBYTES * OVERSAMPLINGFACTOR)
@@ -603,7 +547,16 @@ static ssize_t gather_entropy(struct kernel_rng *rng, int init)
 		 * entropy.
 		 */
 		ret = write_random(rng, buf, buflen, ret, 0);
-	} else if (kernver_ge(5, 18, 0)) {
+	} else {
+		if (!kernver_ge(5, 18, 0)) {
+			static int reported = 0;
+
+			if (!reported) {
+				dolog(LOG_WARN, "Kernel older than 5.18 detected - DRT.1 status unclear");
+				reported = 1;
+			}
+		}
+
 		/*
 		 * AIS 20/31 DRT.1, no special handling is necessary.
 		 */
@@ -619,46 +572,6 @@ static ssize_t gather_entropy(struct kernel_rng *rng, int init)
 		 * full entropy so, we tell the Linux RNG the amount of entropy.
 		 */
 		ret = write_random(rng, buf, buflen, ret, 1);
-	} else if (kernver_ge(4, 17, 0)) {
-		unsigned int numblocks = 1, i;
-
-		if (force_sp80090b || init) {
-			numblocks = ENTBLOCKS;
-			buflen *= numblocks;
-		}
-
-		/*
-		 * Generate twice the entropy data, once for the input_pool
-		 * and once for ChaCha20.
-		 */
-		ret = read_jent(rng, buf, buflen);
-		if (ret < 0)
-			goto out;
-
-		dolog(LOG_DEBUG, "Linux kernel >= 4.17: Inject entropy into %s",
-		      force_sp80090b ? "ChaCha20 DRNG" : "input pool");
-		ret = write_random_90B(rng, buf, ENTBLOCKSIZE, ENTROPYBYTES,
-				       force_sp80090b || init);
-		numblocks--;
-
-		for (i = 0; i < numblocks; i++) {
-			dolog(LOG_DEBUG, "Inject entropy into input_pool");
-			ret += write_random_90B(rng, buf + ENTBLOCKSIZE * i,
-						ENTBLOCKSIZE, ENTROPYBYTES, 0);
-		}
-	} else {
-		if (force_sp80090b)
-			buflen = SHA1_FOLD_OUTPUT_SIZE;
-
-		ret = read_jent(rng, buf, buflen);
-		if (ret < 0)
-			goto out;
-
-		dolog(LOG_DEBUG, "Fallback case: Inject %u bits of data with %u bits of entropy into Blake2S state",
-		      buflen << 3, (buflen / OVERSAMPLINGFACTOR) << 3);
-
-		ret = write_random_90B(rng, buf, buflen,
-				       buflen / OVERSAMPLINGFACTOR, 0);
 	}
 
 	if (ret >= 0 && buflen != ret) {
@@ -739,7 +652,7 @@ static void sig_entropy_avail(int sig)
 				if (alloc() < 0)
 					goto out;
 			}
-			written = gather_entropy(&Random, 0);
+			written = gather_entropy(&Random);
 		} while (written < 0);
 		dolog(LOG_VERBOSE, "%zd bytes written to /dev/random", written);
 		goto out;
@@ -763,7 +676,7 @@ static void sig_entropy_avail(int sig)
 			if (alloc() < 0)
 				goto out;
 		}
-		written = gather_entropy(&Random, 0);
+		written = gather_entropy(&Random);
 	} while (written < 0);
 	dolog(LOG_VERBOSE, "%zd bytes written to /dev/random", written);
 out:
@@ -825,7 +738,7 @@ static void select_fd(void)
 					if (alloc() < 0)
 						continue;
 				}
-				written = gather_entropy(&Random, 0);
+				written = gather_entropy(&Random);
 			} while (written < 0);
 			dolog(LOG_VERBOSE, "%zd bytes written to /dev/random",
 			      written);
@@ -965,7 +878,7 @@ static int alloc(void)
 		return -errsv;
 	}
 
-	written = gather_entropy(&Random, 1);
+	written = gather_entropy(&Random);
 	if (written >= 0) {
 		dolog(LOG_VERBOSE, "%zd bytes to /dev/random", written);
 	} else {
