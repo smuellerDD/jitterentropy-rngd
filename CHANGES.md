@@ -1,6 +1,8 @@
 1.3.2:
  * Add --exit-on-error option
 
+ * Drop special SP800-90B handling for the old SHA-1-based Linux RNG
+
 1.3.1:
  * Fix incomplete merger with Jitter RNG 3.7.0 library
 
