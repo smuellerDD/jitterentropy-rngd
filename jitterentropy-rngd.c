@@ -622,10 +622,12 @@ out:
 static int read_entropy_value(int fd)
 {
 	ssize_t data = 0;
-	char buf[5];
-	int entropy = 0;
+	/* Room for the largest value ("4096") plus the trailing NULL byte */
+	char buf[8];
+	char *endptr = NULL;
+	long entropy = 0;
 
-	data = read(fd, buf, sizeof(buf));
+	data = read(fd, buf, sizeof(buf) - 1);
 	lseek(fd, 0, SEEK_SET);
 
 	if (0 > data) {
@@ -638,13 +640,26 @@ static int read_entropy_value(int fd)
 		return 0;
 	}
 
-	entropy = atoi(buf);
-	if (0 > entropy || 4096 < entropy) {
-		dolog(LOG_WARN, "Entropy read from entropy fd (%d) is outsize of range", entropy);
+	/*
+	 * read(2) does not NULL-terminate - do it here, as the conversion
+	 * below would otherwise read beyond the buffer.
+	 */
+	buf[data] = '\0';
+
+	errno = 0;
+	entropy = strtol(buf, &endptr, 10);
+	if (errno || endptr == buf) {
+		dolog(LOG_WARN, "Cannot parse value read from entropy fd");
 		return 0;
 	}
 
-	return entropy;
+	if (0 > entropy || 4096 < entropy) {
+		dolog(LOG_WARN, "Entropy read from entropy fd (%ld) is outside of range",
+		      entropy);
+		return 0;
+	}
+
+	return (int)entropy;
 }
 
 /*******************************************************************
