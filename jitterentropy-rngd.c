@@ -84,6 +84,13 @@ static int status = 0;
 static int use_syslog = 0;
 
 /*
+ * When set, the daemon does not detach from the invoking terminal. Whether the
+ * daemon forks is decided by this flag alone - it is deliberately independent
+ * of the log verbosity.
+ */
+static int foreground = 0;
+
+/*
  * When set, the daemon will exit on any error it encounters. The goal is that
  * a wrapping monitor will pick up the errors and handle it as it sees fit, such
  * as creating audit logs and possibly restart the daemon.
@@ -283,7 +290,7 @@ static void usage(void)
 	fprintf(stderr, "\t-h --help\tThis help information\n");
 	fprintf(stderr, "\t   --version\tPrint version\n");
 	fprintf(stderr, "\t-v --verbose\tVerbose logging, multiple options increase verbosity\n");
-	fprintf(stderr, "\t\t\tVerbose logging implies running in foreground\n");
+	fprintf(stderr, "\t-F --foreground\tDo not detach, keep running in the foreground\n");
 	fprintf(stderr, "\t-l --syslog\tLog to syslog instead of stdout - required to see\n");
 	fprintf(stderr, "\t\t\tany log output when the daemon detaches\n");
 	fprintf(stderr, "\t-p --pid\tWrite daemon PID to file\n");
@@ -336,9 +343,10 @@ static void parse_opts(int argc, char *argv[])
 			{"status", 0, 0, 0},
 			{"exit-on-error", 0, 0, 0},
 			{"syslog", 0, 0, 0},
+			{"foreground", 0, 0, 0},
 			{0, 0, 0, 0}
 		};
-		c = getopt_long(argc, argv, "svp:hf:o:l", opts, &opt_index);
+		c = getopt_long(argc, argv, "svp:hf:o:lF", opts, &opt_index);
 		if (-1 == c)
 			break;
 		switch (c) {
@@ -398,6 +406,11 @@ static void parse_opts(int argc, char *argv[])
 				use_syslog = 1;
 				break;
 
+			/* foreground */
+			case 10:
+				foreground = 1;
+				break;
+
 			default:
 				usage();
 			}
@@ -416,6 +429,9 @@ static void parse_opts(int argc, char *argv[])
 			break;
 		case 'l':
 			use_syslog = 1;
+			break;
+		case 'F':
+			foreground = 1;
 			break;
 		case 'f':
 			jent_flags = parse_uint(optarg);
@@ -1316,7 +1332,7 @@ int main(int argc, char *argv[])
 	if (ret)
 		goto out;
 
-	if (0 == Verbosity)
+	if (!foreground)
 		daemonize();
 	install_term();
 	install_alarm(ALARM_PERIOD_PHASE1);

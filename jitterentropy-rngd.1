@@ -73,10 +73,23 @@ The following options are supported when invoking
 .TP
 \fB\-v\fR, \fB\-\-verbose\fR
 enable a verbose operation of the daemon. Using this option
-multiple times increases the verbosity. Using this option
-implies that the
+multiple times increases the verbosity. This option does not
+affect whether the
 .IR jitterentropy-rngd
-will not daemonize.
+daemonizes, see
+.BR \-\-foreground .
+Note that a daemonized
+.IR jitterentropy-rngd
+has its standard output redirected to /dev/null, so
+.BR \-\-syslog
+is required to see any of the messages.
+.TP
+\fB\-F\fR, \fB\-\-foreground\fR
+keep the
+.IR jitterentropy-rngd
+in the foreground instead of detaching it from the invoking
+terminal. Without this option the daemon forks into the
+background.
 .TP
 \fB\-l\fR, \fB\-\-syslog\fR
 send all log messages to syslog(3) using the
