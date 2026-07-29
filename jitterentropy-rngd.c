@@ -188,6 +188,7 @@ static int get_kernver(void)
 	struct utsname kernel;
 	char *saveptr = NULL;
 	char *res = NULL;
+	unsigned long maj, minor, patchlevel;
 
 	if (kern_maj != ULONG_MAX)
 		return 0;
@@ -195,29 +196,41 @@ static int get_kernver(void)
 	if (uname(&kernel))
 		return -errno;
 
+	/*
+	 * Parse into local variables and only publish them once all three
+	 * components were obtained. Otherwise a partial parse would leave
+	 * kern_maj set, which makes all subsequent calls report success while
+	 * kern_minor / kern_patchlevel hold bogus values.
+	 */
+
 	/* 5.11.2 */
 	res = strtok_r(kernel.release, ".", &saveptr);
-	if (!res) {
-		printf("Could not parse kernel version");
-		return -EFAULT;
-	}
-	kern_maj = strtoul(res, NULL, 10);
+	if (!res)
+		goto err;
+	maj = strtoul(res, NULL, 10);
 
 	res = strtok_r(NULL, ".", &saveptr);
-	if (!res) {
-		printf("Could not parse kernel version");
-		return -EFAULT;
-	}
-	kern_minor = strtoul(res, NULL, 10);
+	if (!res)
+		goto err;
+	minor = strtoul(res, NULL, 10);
 
 	res = strtok_r(NULL, ".", &saveptr);
-	if (!res) {
-		printf("Could not parse kernel version");
-		return -EFAULT;
-	}
-	kern_patchlevel = strtoul(res, NULL, 10);
+	if (!res)
+		goto err;
+	patchlevel = strtoul(res, NULL, 10);
+
+	if (maj == ULONG_MAX)
+		goto err;
+
+	kern_maj = maj;
+	kern_minor = minor;
+	kern_patchlevel = patchlevel;
 
 	return 0;
+
+err:
+	dolog(LOG_WARN, "Could not parse kernel version \"%s\"", kernel.release);
+	return -EFAULT;
 }
 
 /* return true if kernel is greater or equal to given values, otherwise false */
