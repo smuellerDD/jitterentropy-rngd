@@ -839,6 +839,8 @@ static void notify_ready(void)
 static ssize_t write_random(struct kernel_rng *rng, char *buf, size_t len,
 			    size_t entropy_bytes, int force_reseed)
 {
+	/* Set once the kernel rejected RNDRESEEDCRNG as an unknown command. */
+	static int reseed_ioctl_absent = 0;
 	ssize_t written = 0;
 	int ret;
 
@@ -879,12 +881,22 @@ static ssize_t write_random(struct kernel_rng *rng, char *buf, size_t len,
 	/*
 	 * The LRNG does not require this IOCTL as the reseed is automatically
 	 * triggered.
+	 *
+	 * Whether the kernel implements the IOCTL is settled by asking it
+	 * instead of by its version: it appeared with 4.17, but the stable
+	 * series carry it as a backport far below that - 4.9.319 has it, for
+	 * example. random_ioctl() answers EINVAL for a command it does not
+	 * know, and a kernel without the reseed trigger is no error: the
+	 * entropy has been written and is picked up with the next reseed.
 	 */
-	if (force_reseed && kernver_ge(4, 17, 0) && !lrng_present()) {
+	if (force_reseed && !lrng_present() && !reseed_ioctl_absent) {
 		if (ioctl(rng->fd, RNDRESEEDCRNG) < 0) {
-			written = -errno;
-			if (errno == EINVAL)
+			if (errno == EINVAL) {
+				reseed_ioctl_absent = 1;
+				dolog(JENT_LOG_DEBUG, "Kernel does not implement the reseed IOCTL - leaving the reseed to the kernel");
 				goto out;
+			}
+			written = -errno;
 			dolog(JENT_LOG_WARN,
 			      "Error triggering a reseed of the kernel DRNG: %s",
 			      strerror(errno));
