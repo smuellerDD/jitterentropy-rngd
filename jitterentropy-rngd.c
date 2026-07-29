@@ -722,17 +722,44 @@ static int read_entropy_value(int fd)
  *******************************************************************/
 
 /*
+ * Signal handlers must restrict themselves to the functions listed as
+ * async-signal-safe in POSIX.1 signal-safety(7). Writing a flag of type
+ * volatile sig_atomic_t is permitted, so the handlers below do nothing but
+ * that - the actual work is carried out by the process_*() counterparts
+ * invoked from the main loop in select_fd().
+ *
+ * The previous implementation performed the entire entropy gathering from
+ * within the handler, which calls printf(3), malloc(3) and free(3). Should
+ * such a signal arrive while the interrupted code holds the malloc arena lock
+ * or is in the middle of a stdio operation, the daemon deadlocks or corrupts
+ * its heap.
+ */
+static volatile sig_atomic_t Alarm_pending = 0;
+static volatile sig_atomic_t Term_pending = 0;
+
+static void sig_entropy_avail(int sig)
+{
+	(void)sig;
+	Alarm_pending = 1;
+}
+
+/* terminate the daemon cleanly */
+static void sig_term(int sig)
+{
+	(void)sig;
+	Term_pending = 1;
+}
+
+/*
  * Wakeup and check entropy_avail -- this covers the drain of entropy
  * from the nonblocking_pool via get_random_bytes
  */
-static void sig_entropy_avail(int sig)
+static void process_alarm(void)
 {
 	int entropy = 0, thresh = 0;
 	ssize_t written = 0;
 	static unsigned int force_reseed = FORCE_RESEED_WAKEUPS_PHASE1;
 	static unsigned int alarm_period = ALARM_PERIOD_PHASE1;
-
-	(void)sig;
 
 	dolog(LOG_VERBOSE, "Wakeup call for alarm on %s", ENTROPYAVAIL);
 
@@ -763,20 +790,14 @@ out:
 	return;
 }
 
-/* terminate the daemon cleanly */
-static void sig_term(int sig)
+/* Deferred clean shutdown - does not return */
+static void process_term(void)
 {
-	(void)sig;
-	dolog(LOG_DEBUG, "Shutting down cleanly\n");
+	dolog(LOG_DEBUG, "Shutting down cleanly");
 
-	/* Prevent the kernel from interfering with the shutdown */
+	/* Prevent the alarm from interfering with the shutdown */
+	alarm(0);
 	signal(SIGALRM, SIG_IGN);
-
-	/* If we got another termination signal, just get killed */
-	signal(SIGHUP, SIG_DFL);
-	signal(SIGINT, SIG_DFL);
-	signal(SIGQUIT, SIG_DFL);
-	signal(SIGTERM, SIG_DFL);
 
 	dealloc();
 	exit(0);
@@ -790,13 +811,56 @@ static void select_fd(void)
 	fd_set fds;
 	int ret = 0;
 	ssize_t written = 0;
+	sigset_t blocked, unblocked;
+
+	sigemptyset(&blocked);
+	sigaddset(&blocked, SIGALRM);
+	sigaddset(&blocked, SIGHUP);
+	sigaddset(&blocked, SIGINT);
+	sigaddset(&blocked, SIGQUIT);
+	sigaddset(&blocked, SIGTERM);
 
 	while (1) {
+		/*
+		 * Block the signals that drive the daemon for the duration of
+		 * the flag test and the wait, and hand the previous - i.e.
+		 * unblocked - mask to pselect(2). pselect restores that mask
+		 * for as long as it waits and re-blocks before returning, so
+		 * the test below and going to sleep are one atomic operation.
+		 *
+		 * Without this, a signal arriving between the test and the
+		 * wait would set its flag, be gone by the time we sleep, and
+		 * leave the daemon blocked until the next unrelated wakeup -
+		 * on current kernels /dev/random never becomes writable, so a
+		 * missed alarm would stall the daemon indefinitely.
+		 *
+		 * The window is kept narrow on purpose: the signals stay
+		 * unblocked while entropy is gathered below, so a termination
+		 * request is recorded the moment it arrives.
+		 */
+		sigprocmask(SIG_BLOCK, &blocked, &unblocked);
+
+		if (Term_pending) {
+			sigprocmask(SIG_SETMASK, &unblocked, NULL);
+			process_term();
+			/* NOTREACHED */
+		}
+
+		if (Alarm_pending) {
+			Alarm_pending = 0;
+			sigprocmask(SIG_SETMASK, &unblocked, NULL);
+			process_alarm();
+			continue;
+		}
+
 		FD_ZERO(&fds);
 		dolog(LOG_DEBUG, "Polling /dev/random");
 		FD_SET(Random.fd, &fds);
 		/* only /dev/random implements polling */
-		ret = select((Random.fd + 1), NULL, &fds, NULL, NULL);
+		ret = pselect((Random.fd + 1), NULL, &fds, NULL, NULL,
+			      &unblocked);
+
+		sigprocmask(SIG_SETMASK, &unblocked, NULL);
 
 		if (-1 == ret && EINTR != errno) {
 			if (exit_on_error) {
@@ -816,22 +880,59 @@ static void select_fd(void)
 	}
 }
 
+/*
+ * Install a signal handler via sigaction(2) - unlike signal(2) its semantics
+ * are unambiguous across systems.
+ *
+ * SA_RESTART is requested so that the blocking calls used elsewhere (read(2)
+ * on the procfs files, the RNDADDENTROPY IOCTL) are resumed rather than
+ * failing with EINTR. This does not affect the wait in select_fd(): per
+ * signal(7) pselect(2) is never restarted and always reports EINTR, which is
+ * exactly what the main loop needs to notice a pending flag.
+ */
+static int install_handler(int sig, void (*handler)(int), int flags)
+{
+	struct sigaction sa;
+
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_handler = handler;
+	sigemptyset(&sa.sa_mask);
+	sa.sa_flags = flags | SA_RESTART;
+
+	return sigaction(sig, &sa, NULL);
+}
+
 static void install_alarm(unsigned int secs)
 {
 	if (lrng_present())
 		return;
 	dolog(LOG_DEBUG, "Install alarm signal handler");
-	signal(SIGALRM, sig_entropy_avail);
+	if (install_handler(SIGALRM, sig_entropy_avail, 0))
+		dolog(LOG_ERR, "Cannot install alarm handler: %s",
+		      strerror(errno));
 	alarm(secs);
 }
 
 static void install_term(void)
 {
+	static const int term_sigs[] = { SIGHUP, SIGINT, SIGQUIT, SIGTERM };
+	size_t i;
+
 	dolog(LOG_DEBUG, "Install termination signal handler");
-	signal(SIGHUP, sig_term);
-	signal(SIGINT, sig_term);
-	signal(SIGQUIT, sig_term);
-	signal(SIGTERM, sig_term);
+
+	for (i = 0; i < (sizeof(term_sigs) / sizeof(term_sigs[0])); i++) {
+		/*
+		 * SA_RESETHAND restores the default disposition once the
+		 * signal was delivered: if the clean shutdown cannot complete,
+		 * a second termination signal kills the daemon outright. This
+		 * replaces the signal(SIGxxx, SIG_DFL) calls that the former
+		 * handler performed on itself.
+		 */
+		if (install_handler(term_sigs[i], sig_term, SA_RESETHAND))
+			dolog(LOG_ERR,
+			      "Cannot install termination handler: %s",
+			      strerror(errno));
+	}
 }
 
 /*******************************************************************
