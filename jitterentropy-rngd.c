@@ -168,7 +168,18 @@ static unsigned int jent_osr = 1;
 #define ALARM_PERIOD_PHASE2	50
 #define ENTROPYAVAIL "/proc/sys/kernel/random/entropy_avail"
 #define ENTROPYTHRESH "/proc/sys/kernel/random/write_wakeup_threshold"
+#define POOLSIZE "/proc/sys/kernel/random/poolsize"
 #define LRNG_FILE "/proc/lrng_type"
+
+/*
+ * The pool size the kernel exports tells the two implementations of
+ * drivers/char/random.c apart: the reworked one hashes into a BLAKE2s state and
+ * reports BLAKE2S_HASH_SIZE * 8 bits, the legacy one reports the size of its
+ * word based input pool, INPUT_POOL_WORDS * 32. The value is a compile time
+ * constant of the kernel in either case.
+ */
+#define POOLSIZE_REWORKED	256
+#define POOLSIZE_LEGACY		4096
 
 #define JENT_LOG_DEBUG	3
 #define JENT_LOG_VERBOSE	2
@@ -276,6 +287,144 @@ static int kernver_ge(unsigned int maj, unsigned int minor,
 		}
 	}
 	return 0;
+}
+
+/*
+ * Read the pool size exported by the kernel, or return -1 if it is unavailable.
+ *
+ * Unlike the entropy values consulted during operation this is a constant of
+ * the running kernel, so the file is opened only for this one read instead of
+ * being kept around.
+ */
+static int read_poolsize(void)
+{
+	char buf[16];
+	char *endptr = NULL;
+	long poolsize;
+	ssize_t data;
+	int fd = open(POOLSIZE, O_RDONLY);
+
+	if (0 > fd) {
+		dolog(JENT_LOG_DEBUG, "Open of %s failed: %s", POOLSIZE,
+		      strerror(errno));
+		return -1;
+	}
+
+	data = read(fd, buf, sizeof(buf) - 1);
+	close(fd);
+
+	if (0 >= data) {
+		dolog(JENT_LOG_DEBUG, "Could not read data from %s", POOLSIZE);
+		return -1;
+	}
+
+	/* read(2) does not NULL-terminate - do it here. */
+	buf[data] = '\0';
+
+	errno = 0;
+	poolsize = strtol(buf, &endptr, 10);
+	if (errno || endptr == buf || 0 >= poolsize || INT_MAX < poolsize) {
+		dolog(JENT_LOG_DEBUG, "Cannot parse value read from %s",
+		      POOLSIZE);
+		return -1;
+	}
+
+	return (int)poolsize;
+}
+
+/*
+ * Return true if the kernel version indicates the RNG rework that turned the
+ * exported seed level into a constant.
+ *
+ * Mainline gained it with 5.18, but the stable trees received it as a backport
+ * in the middle of a series, so comparing against 5.18 alone misjudges every
+ * LTS kernel still in use. The table lists the first patch level of each older
+ * series that ships the reworked drivers/char/random.c - determined by
+ * entropy_avail being wired to input_pool.init_bits and write_wakeup_threshold
+ * to POOL_READY_BITS, which is what pins both values to the pool size. Series
+ * missing from the table (5.16, 4.4 and older) went EOL without the backport.
+ */
+static int rng_rework_by_version(void)
+{
+	static const struct {
+		unsigned long maj;
+		unsigned long minor;
+		unsigned long patchlevel;
+	} backport[] = {
+		{ 5, 17,  12 },
+		{ 5, 15,  44 },
+		{ 5, 10, 119 },
+		{ 5,  4, 200 },
+		{ 4, 19, 249 },
+		{ 4, 14, 285 },
+		{ 4,  9, 320 },
+	};
+	unsigned int i;
+
+	/*
+	 * Without a version there is nothing to match against. Claim the rework
+	 * is present, as that only makes the caller inject entropy where it
+	 * might not be needed - the opposite error keeps the daemon trusting a
+	 * value that never changes.
+	 */
+	if (get_kernver())
+		return 1;
+
+	if (kernver_ge(5, 18, 0))
+		return 1;
+
+	for (i = 0; i < sizeof(backport) / sizeof(backport[0]); i++) {
+		if (kern_maj != backport[i].maj ||
+		    kern_minor != backport[i].minor)
+			continue;
+		return (kern_patchlevel >= backport[i].patchlevel);
+	}
+
+	return 0;
+}
+
+/*
+ * Return true if the running kernel carries the RNG rework that turned the
+ * exported seed level into a constant.
+ *
+ * The pool size answers this directly and is therefore consulted first: it
+ * follows the code that is actually running and thus covers the distribution
+ * kernels whose version says nothing about their content - a Ubuntu
+ * 5.15.0-119-generic carries the backport but parses as 5.15.0. Only where the
+ * kernel reports neither of the two known sizes does the version decide.
+ *
+ * The result is cached, none of the inputs change while the daemon runs.
+ */
+static int rng_rework_present(void)
+{
+	static int reworked = -1;
+	int poolsize;
+
+	if (0 <= reworked)
+		return reworked;
+
+	poolsize = read_poolsize();
+	switch (poolsize) {
+	case POOLSIZE_REWORKED:
+		reworked = 1;
+		break;
+	case POOLSIZE_LEGACY:
+		reworked = 0;
+		break;
+	default:
+		reworked = rng_rework_by_version();
+		if (0 > poolsize)
+			dolog(JENT_LOG_DEBUG, "Pool size unavailable - deducing the RNG implementation from the kernel version instead");
+		else
+			dolog(JENT_LOG_DEBUG, "Unexpected pool size %d - deducing the RNG implementation from the kernel version instead",
+			      poolsize);
+		break;
+	}
+
+	dolog(JENT_LOG_DEBUG, "Kernel %s the reworked RNG implementation",
+	      reworked ? "provides" : "does not provide");
+
+	return reworked;
 }
 
 static void usage(void)
@@ -727,7 +876,6 @@ static ssize_t write_random(struct kernel_rng *rng, char *buf, size_t len,
 	rng->rpi->buf_size = 0;
 	memset(rng->rpi->buf, 0, len);
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,17,0)
 	/*
 	 * The LRNG does not require this IOCTL as the reseed is automatically
 	 * triggered.
@@ -744,7 +892,6 @@ static ssize_t write_random(struct kernel_rng *rng, char *buf, size_t len,
 			dolog(JENT_LOG_DEBUG, "Reseeding of kernel DRNG triggered");
 		}
 	}
-#endif
 
 out:
 	return written;
@@ -812,11 +959,11 @@ static ssize_t gather_entropy(struct kernel_rng *rng)
 		 */
 		ret = write_random(rng, buf, buflen, ret, 0);
 	} else {
-		if (!kernver_ge(5, 18, 0)) {
+		if (!rng_rework_present()) {
 			static int reported = 0;
 
 			if (!reported) {
-				dolog(JENT_LOG_WARN, "Kernel older than 5.18 detected - DRT.1 status unclear");
+				dolog(JENT_LOG_WARN, "Kernel without the reworked RNG implementation detected - DRT.1 status unclear");
 				reported = 1;
 			}
 		}
@@ -828,7 +975,7 @@ static ssize_t gather_entropy(struct kernel_rng *rng)
 		if (ret < 0)
 			goto out;
 
-		dolog(JENT_LOG_DEBUG, "Linux kernel >= 5.18: Inject %zd bits of data with %zd bits of entropy into BLAKE2s state",
+		dolog(JENT_LOG_DEBUG, "Linux RNG: Inject %zd bits of data with %zd bits of entropy into BLAKE2s state",
 		      buflen << 3, ret << 3);
 
 		/*
@@ -962,6 +1109,27 @@ static int read_entropy_value(int fd)
 	return (int)entropy;
 }
 
+/*
+ * Does the seed level exported by the kernel still say anything about the
+ * actual need for entropy?
+ *
+ * Only on a legacy /dev/random does it. With the 5.18 RNG rework - which the
+ * still maintained LTS series carry as a backport, see rng_rework_present() -
+ * the entropy accounting was removed: entropy_avail is pinned to the size of
+ * the pool as soon as the DRNG is initialized and write_wakeup_threshold was
+ * retained as a no-op for compatibility only. Comparing the two therefore
+ * always claims that entropy is plentiful. The LRNG likewise maintains its own
+ * accounting behind those files.
+ *
+ * Where the values carry no meaning, the daemon must not let them decide - it
+ * injects on every wakeup instead, which is the behavior the force reseed path
+ * provides for the legacy case.
+ */
+static int seedlevel_indicative(void)
+{
+	return !rng_rework_present() && !lrng_present();
+}
+
 /*******************************************************************
  * Signal handling functions
  *******************************************************************/
@@ -998,6 +1166,9 @@ static void sig_term(int sig)
 /*
  * Wakeup and check entropy_avail -- this covers the drain of entropy
  * from the nonblocking_pool via get_random_bytes
+ *
+ * If kernel is recent enough and does not drain the reported entropy level
+ * (re-)seed unconditionally.
  */
 static void process_alarm(void)
 {
@@ -1012,24 +1183,33 @@ static void process_alarm(void)
 		force_reseed = FORCE_RESEED_WAKEUPS_PHASE2;
 		alarm_period = ALARM_PERIOD_PHASE2;
 		dolog(JENT_LOG_DEBUG, "Force reseed");
-		written = gather_entropy_retry(&Random);
-		dolog(JENT_LOG_VERBOSE, "%zd bytes written to /dev/random", written);
-		goto out;
+		goto gather;
 	}
 
-	entropy = read_entropy_value(Entropy_avail_fd);
-	thresh = read_entropy_value(Entropy_thresh_fd);
+	/*
+	 * Nothing to consult where the seed level is not indicative - seed
+	 * unconditionally rather than trusting a value that is a constant.
+	 */
+	if (seedlevel_indicative()) {
+		entropy = read_entropy_value(Entropy_avail_fd);
+		thresh = read_entropy_value(Entropy_thresh_fd);
 
-	if (0 == entropy || 0 == thresh)
-		goto out;
-	if (entropy >= thresh) {
-		dolog(JENT_LOG_DEBUG, "Sufficient entropy %d available", entropy);
-		goto out;
+		if (0 == entropy || 0 == thresh)
+			goto out;
+		if (entropy >= thresh) {
+			dolog(JENT_LOG_DEBUG, "Sufficient entropy %d available", entropy);
+			goto out;
+		}
+		dolog(JENT_LOG_DEBUG, "Insufficient entropy %d available (threshold %d)",
+			  entropy, thresh);
+	} else {
+		dolog(JENT_LOG_DEBUG, "Seed level not indicative, injecting entropy");
 	}
-	dolog(JENT_LOG_DEBUG, "Insufficient entropy %d available (threshold %d)",
-	      entropy, thresh);
+
+gather:
 	written = gather_entropy_retry(&Random);
 	dolog(JENT_LOG_VERBOSE, "%zd bytes written to /dev/random", written);
+
 out:
 	install_alarm(alarm_period);
 	return;
@@ -1297,7 +1477,7 @@ static int alloc(void)
 
 	written = gather_entropy(&Random);
 	if (written >= 0) {
-		dolog(JENT_LOG_VERBOSE, "%zd bytes to /dev/random", written);
+		dolog(JENT_LOG_VERBOSE, "%zd bytes written to /dev/random", written);
 	} else {
 		/*
 		 * We consider this as no error at this point - note that
