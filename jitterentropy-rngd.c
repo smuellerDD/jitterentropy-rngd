@@ -631,6 +631,57 @@ out:
 	return ret;
 }
 
+/*
+ * Number of times the Jitter RNG is torn down and re-initialized when the
+ * gathering of entropy reports an error.
+ *
+ * The retry has to be bounded: an error that does not heal (say, the
+ * RNDADDENTROPY IOCTL being rejected) would otherwise make the caller spin in
+ * a tight loop, burning a CPU indefinitely while re-allocating the entropy
+ * collector on every iteration.
+ */
+#define GATHER_RETRIES	5
+
+static ssize_t gather_entropy_retry(struct kernel_rng *rng)
+{
+	unsigned int i;
+	ssize_t written = gather_entropy(rng);
+
+	for (i = 0; written < 0 && i < GATHER_RETRIES; i++) {
+		int ret;
+
+		dolog(LOG_DEBUG, "Re-initializing rngd");
+		dealloc();
+
+		ret = alloc();
+		if (ret < 0) {
+			dolog(LOG_WARN,
+			      "Re-initialization of rngd failed with %d", ret);
+			return ret;
+		}
+
+		written = gather_entropy(rng);
+	}
+
+	if (written < 0) {
+		struct timespec delay;
+
+		dolog(LOG_WARN,
+		      "Gathering of entropy still failing after %u retries",
+		      GATHER_RETRIES);
+
+		/*
+		 * Back off before returning to the caller so that a permanent
+		 * error does not translate into a hot loop.
+		 */
+		delay.tv_sec = 1;
+		delay.tv_nsec = 0;
+		nanosleep(&delay, NULL);
+	}
+
+	return written;
+}
+
 static int read_entropy_value(int fd)
 {
 	ssize_t data = 0;
@@ -697,15 +748,7 @@ static void sig_entropy_avail(int sig)
 		force_reseed = FORCE_RESEED_WAKEUPS_PHASE2;
 		alarm_period = ALARM_PERIOD_PHASE2;
 		dolog(LOG_DEBUG, "Force reseed");
-		do {
-			if (written < 0) {
-				dolog(LOG_DEBUG, "Re-initializing rngd\n");
-				dealloc();
-				if (alloc() < 0)
-					goto out;
-			}
-			written = gather_entropy(&Random);
-		} while (written < 0);
+		written = gather_entropy_retry(&Random);
 		dolog(LOG_VERBOSE, "%zd bytes written to /dev/random", written);
 		goto out;
 	}
@@ -721,15 +764,7 @@ static void sig_entropy_avail(int sig)
 	}
 	dolog(LOG_DEBUG, "Insufficient entropy %d available (threshold %d)",
 	      entropy, thresh);
-	do {
-		if (written < 0) {
-			dolog(LOG_DEBUG, "Re-initializing rngd\n");
-			dealloc();
-			if (alloc() < 0)
-				goto out;
-		}
-		written = gather_entropy(&Random);
-	} while (written < 0);
+	written = gather_entropy_retry(&Random);
 	dolog(LOG_VERBOSE, "%zd bytes written to /dev/random", written);
 out:
 	install_alarm(alarm_period);
@@ -782,16 +817,7 @@ static void select_fd(void)
 		}
 		if (0 <= ret) {
 			dolog(LOG_VERBOSE, "Wakeup call for select on /dev/random");
-			do {
-				if (written < 0) {
-					dolog(LOG_DEBUG,
-					      "Re-initializing rngd\n");
-					dealloc();
-					if (alloc() < 0)
-						continue;
-				}
-				written = gather_entropy(&Random);
-			} while (written < 0);
+			written = gather_entropy_retry(&Random);
 			dolog(LOG_VERBOSE, "%zd bytes written to /dev/random",
 			      written);
 		}
@@ -934,9 +960,14 @@ static int alloc(void)
 	if (written >= 0) {
 		dolog(LOG_VERBOSE, "%zd bytes to /dev/random", written);
 	} else {
-		dolog(LOG_ERR, "Cannot write to /dev/random, failure: %zd",
+		/*
+		 * We consider this as no error at this point - note that
+		 * dolog(LOG_ERR) terminates the daemon, which would defeat the
+		 * re-initialization performed by gather_entropy_retry().
+		 * gather_entropy() already honors --exit-on-error itself.
+		 */
+		dolog(LOG_WARN, "Cannot write to /dev/random, failure: %zd",
 		      written);
-		/* We consider this as no error at this point */
 	}
 
 	return 0;
