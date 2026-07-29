@@ -147,10 +147,10 @@ static unsigned int jent_osr = 1;
 #define ENTROPYTHRESH "/proc/sys/kernel/random/write_wakeup_threshold"
 #define LRNG_FILE "/proc/lrng_type"
 
-#define LOG_DEBUG	3
-#define LOG_VERBOSE	2
-#define LOG_WARN	1
-#define LOG_ERR		0
+#define JENT_LOG_DEBUG	3
+#define JENT_LOG_VERBOSE	2
+#define JENT_LOG_WARN	1
+#define JENT_LOG_ERR		0
 
 static void install_alarm(unsigned int secs);
 static void dealloc(void);
@@ -231,7 +231,7 @@ static int get_kernver(void)
 	return 0;
 
 err:
-	dolog(LOG_WARN, "Could not parse kernel version \"%s\"", kernel.release);
+	dolog(JENT_LOG_WARN, "Could not parse kernel version \"%s\"", kernel.release);
 	return -EFAULT;
 }
 
@@ -417,16 +417,16 @@ static void dolog(int severity, const char *fmt, ...)
 		va_end(args);
 
 		switch (severity) {
-		case LOG_DEBUG:
+		case JENT_LOG_DEBUG:
 			snprintf(sev, sizeof(sev), "Debug");
 			break;
-		case LOG_VERBOSE:
+		case JENT_LOG_VERBOSE:
 			snprintf(sev, sizeof(sev), "Verbose");
 			break;
-		case LOG_WARN:
+		case JENT_LOG_WARN:
 			snprintf(sev, sizeof(sev), "Warning");
 			break;
-		case LOG_ERR:
+		case JENT_LOG_ERR:
 			snprintf(sev, sizeof(sev), "Error");
 			break;
 		default:
@@ -435,7 +435,7 @@ static void dolog(int severity, const char *fmt, ...)
 		printf("jitterentropy-rngd - %s: %s\n", sev, msg);
 	}
 
-	if (LOG_ERR == severity) {
+	if (JENT_LOG_ERR == severity) {
 		dealloc();
 		exit(1);
 	}
@@ -465,7 +465,7 @@ static ssize_t write_random(struct kernel_rng *rng, char *buf, size_t len,
 	 * guard the memcpy below against a caller asking for more.
 	 */
 	if (len > RNDADDENTROPY_BUFSIZE) {
-		dolog(LOG_WARN, "Injection of %zu bytes requested, buffer holds only %u bytes",
+		dolog(JENT_LOG_WARN, "Injection of %zu bytes requested, buffer holds only %u bytes",
 		      len, (unsigned int)RNDADDENTROPY_BUFSIZE);
 		return -EOVERFLOW;
 	}
@@ -479,10 +479,10 @@ static ssize_t write_random(struct kernel_rng *rng, char *buf, size_t len,
 	if (0 > ret) {
 		int errsv = errno;
 
-		dolog(LOG_WARN, "Error injecting entropy: %s", strerror(errsv));
+		dolog(JENT_LOG_WARN, "Error injecting entropy: %s", strerror(errsv));
 		return -errsv;
 	} else {
-		dolog(LOG_DEBUG, "Injected %zu bytes with an entropy count of %zu bytes of entropy",
+		dolog(JENT_LOG_DEBUG, "Injected %zu bytes with an entropy count of %zu bytes of entropy",
 		      len, entropy_bytes);
 		written = len;
 	}
@@ -501,11 +501,11 @@ static ssize_t write_random(struct kernel_rng *rng, char *buf, size_t len,
 			written = -errno;
 			if (errno == EINVAL)
 				goto out;
-			dolog(LOG_WARN,
+			dolog(JENT_LOG_WARN,
 			      "Error triggering a reseed of the kernel DRNG: %s",
 			      strerror(errno));
 		} else {
-			dolog(LOG_DEBUG, "Reseeding of kernel DRNG triggered");
+			dolog(JENT_LOG_DEBUG, "Reseeding of kernel DRNG triggered");
 		}
 	}
 #endif
@@ -530,7 +530,7 @@ static ssize_t read_jent(struct kernel_rng *rng, char *buf, size_t buflen)
 	if (ret >= 0)
 		return ret;
 
-	dolog(LOG_WARN, "Cannot read entropy");
+	dolog(JENT_LOG_WARN, "Cannot read entropy");
 
 	return -EOPNOTSUPP;
 }
@@ -567,7 +567,7 @@ static ssize_t gather_entropy(struct kernel_rng *rng)
 		if (ret < 0)
 			goto out;
 
-		dolog(LOG_DEBUG, "LRNG: Inject %zd bits of data with %zd bits of entropy into BLAKE2s state",
+		dolog(JENT_LOG_DEBUG, "LRNG: Inject %zd bits of data with %zd bits of entropy into BLAKE2s state",
 		      buflen << 3, ret << 3);
 
 		/*
@@ -581,7 +581,7 @@ static ssize_t gather_entropy(struct kernel_rng *rng)
 			static int reported = 0;
 
 			if (!reported) {
-				dolog(LOG_WARN, "Kernel older than 5.18 detected - DRT.1 status unclear");
+				dolog(JENT_LOG_WARN, "Kernel older than 5.18 detected - DRT.1 status unclear");
 				reported = 1;
 			}
 		}
@@ -593,7 +593,7 @@ static ssize_t gather_entropy(struct kernel_rng *rng)
 		if (ret < 0)
 			goto out;
 
-		dolog(LOG_DEBUG, "Linux kernel >= 5.18: Inject %zd bits of data with %zd bits of entropy into BLAKE2s state",
+		dolog(JENT_LOG_DEBUG, "Linux kernel >= 5.18: Inject %zd bits of data with %zd bits of entropy into BLAKE2s state",
 		      buflen << 3, ret << 3);
 
 		/*
@@ -604,7 +604,7 @@ static ssize_t gather_entropy(struct kernel_rng *rng)
 	}
 
 	if (ret >= 0 && buflen != ret) {
-		dolog(LOG_WARN, "Injected %zd bytes into %s, expected %zd",
+		dolog(JENT_LOG_WARN, "Injected %zd bytes into %s, expected %zd",
 		      ret, rng->dev, buflen);
 		ret = 0;
 	}
@@ -642,12 +642,12 @@ static ssize_t gather_entropy_retry(struct kernel_rng *rng)
 	for (i = 0; written < 0 && i < GATHER_RETRIES; i++) {
 		int ret;
 
-		dolog(LOG_DEBUG, "Re-initializing rngd");
+		dolog(JENT_LOG_DEBUG, "Re-initializing rngd");
 		dealloc();
 
 		ret = alloc();
 		if (ret < 0) {
-			dolog(LOG_WARN,
+			dolog(JENT_LOG_WARN,
 			      "Re-initialization of rngd failed with %d", ret);
 			return ret;
 		}
@@ -658,7 +658,7 @@ static ssize_t gather_entropy_retry(struct kernel_rng *rng)
 	if (written < 0) {
 		struct timespec delay;
 
-		dolog(LOG_WARN,
+		dolog(JENT_LOG_WARN,
 		      "Gathering of entropy still failing after %u retries",
 		      GATHER_RETRIES);
 
@@ -686,12 +686,12 @@ static int read_entropy_value(int fd)
 	lseek(fd, 0, SEEK_SET);
 
 	if (0 > data) {
-		dolog(LOG_WARN, "Error reading data from entropy fd: %s",
+		dolog(JENT_LOG_WARN, "Error reading data from entropy fd: %s",
 		      strerror(errno));
 		return 0;
 	}
 	if (0 == data) {
-		dolog(LOG_WARN, "Could not read data from entropy fd");
+		dolog(JENT_LOG_WARN, "Could not read data from entropy fd");
 		return 0;
 	}
 
@@ -704,12 +704,12 @@ static int read_entropy_value(int fd)
 	errno = 0;
 	entropy = strtol(buf, &endptr, 10);
 	if (errno || endptr == buf) {
-		dolog(LOG_WARN, "Cannot parse value read from entropy fd");
+		dolog(JENT_LOG_WARN, "Cannot parse value read from entropy fd");
 		return 0;
 	}
 
 	if (0 > entropy || 4096 < entropy) {
-		dolog(LOG_WARN, "Entropy read from entropy fd (%ld) is outside of range",
+		dolog(JENT_LOG_WARN, "Entropy read from entropy fd (%ld) is outside of range",
 		      entropy);
 		return 0;
 	}
@@ -761,14 +761,14 @@ static void process_alarm(void)
 	static unsigned int force_reseed = FORCE_RESEED_WAKEUPS_PHASE1;
 	static unsigned int alarm_period = ALARM_PERIOD_PHASE1;
 
-	dolog(LOG_VERBOSE, "Wakeup call for alarm on %s", ENTROPYAVAIL);
+	dolog(JENT_LOG_VERBOSE, "Wakeup call for alarm on %s", ENTROPYAVAIL);
 
 	if (--force_reseed == 0) {
 		force_reseed = FORCE_RESEED_WAKEUPS_PHASE2;
 		alarm_period = ALARM_PERIOD_PHASE2;
-		dolog(LOG_DEBUG, "Force reseed");
+		dolog(JENT_LOG_DEBUG, "Force reseed");
 		written = gather_entropy_retry(&Random);
-		dolog(LOG_VERBOSE, "%zd bytes written to /dev/random", written);
+		dolog(JENT_LOG_VERBOSE, "%zd bytes written to /dev/random", written);
 		goto out;
 	}
 
@@ -778,13 +778,13 @@ static void process_alarm(void)
 	if (0 == entropy || 0 == thresh)
 		goto out;
 	if (entropy >= thresh) {
-		dolog(LOG_DEBUG, "Sufficient entropy %d available", entropy);
+		dolog(JENT_LOG_DEBUG, "Sufficient entropy %d available", entropy);
 		goto out;
 	}
-	dolog(LOG_DEBUG, "Insufficient entropy %d available (threshold %d)",
+	dolog(JENT_LOG_DEBUG, "Insufficient entropy %d available (threshold %d)",
 	      entropy, thresh);
 	written = gather_entropy_retry(&Random);
-	dolog(LOG_VERBOSE, "%zd bytes written to /dev/random", written);
+	dolog(JENT_LOG_VERBOSE, "%zd bytes written to /dev/random", written);
 out:
 	install_alarm(alarm_period);
 	return;
@@ -793,7 +793,7 @@ out:
 /* Deferred clean shutdown - does not return */
 static void process_term(void)
 {
-	dolog(LOG_DEBUG, "Shutting down cleanly");
+	dolog(JENT_LOG_DEBUG, "Shutting down cleanly");
 
 	/* Prevent the alarm from interfering with the shutdown */
 	alarm(0);
@@ -854,7 +854,7 @@ static void select_fd(void)
 		}
 
 		FD_ZERO(&fds);
-		dolog(LOG_DEBUG, "Polling /dev/random");
+		dolog(JENT_LOG_DEBUG, "Polling /dev/random");
 		FD_SET(Random.fd, &fds);
 		/* only /dev/random implements polling */
 		ret = pselect((Random.fd + 1), NULL, &fds, NULL, NULL,
@@ -869,12 +869,12 @@ static void select_fd(void)
 				dealloc();
 				exit(errsv);
 			}
-			dolog(LOG_ERR, "Select returned with error %s", strerror(errno));
+			dolog(JENT_LOG_ERR, "Select returned with error %s", strerror(errno));
 		}
 		if (0 <= ret) {
-			dolog(LOG_VERBOSE, "Wakeup call for select on /dev/random");
+			dolog(JENT_LOG_VERBOSE, "Wakeup call for select on /dev/random");
 			written = gather_entropy_retry(&Random);
-			dolog(LOG_VERBOSE, "%zd bytes written to /dev/random",
+			dolog(JENT_LOG_VERBOSE, "%zd bytes written to /dev/random",
 			      written);
 		}
 	}
@@ -906,9 +906,9 @@ static void install_alarm(unsigned int secs)
 {
 	if (lrng_present())
 		return;
-	dolog(LOG_DEBUG, "Install alarm signal handler");
+	dolog(JENT_LOG_DEBUG, "Install alarm signal handler");
 	if (install_handler(SIGALRM, sig_entropy_avail, 0))
-		dolog(LOG_ERR, "Cannot install alarm handler: %s",
+		dolog(JENT_LOG_ERR, "Cannot install alarm handler: %s",
 		      strerror(errno));
 	alarm(secs);
 }
@@ -918,7 +918,7 @@ static void install_term(void)
 	static const int term_sigs[] = { SIGHUP, SIGINT, SIGQUIT, SIGTERM };
 	size_t i;
 
-	dolog(LOG_DEBUG, "Install termination signal handler");
+	dolog(JENT_LOG_DEBUG, "Install termination signal handler");
 
 	for (i = 0; i < (sizeof(term_sigs) / sizeof(term_sigs[0])); i++) {
 		/*
@@ -929,7 +929,7 @@ static void install_term(void)
 		 * handler performed on itself.
 		 */
 		if (install_handler(term_sigs[i], sig_term, SA_RESETHAND))
-			dolog(LOG_ERR,
+			dolog(JENT_LOG_ERR,
 			      "Cannot install termination handler: %s",
 			      strerror(errno));
 	}
@@ -981,7 +981,7 @@ static int alloc_rng(struct kernel_rng *rng)
 {
 	rng->ec = jent_entropy_collector_alloc(jent_osr, jent_flags);
 	if (!rng->ec) {
-		dolog(LOG_ERR, "Allocation of entropy collector failed");
+		dolog(JENT_LOG_ERR, "Allocation of entropy collector failed");
 		return -EAGAIN;
 	}
 
@@ -999,7 +999,7 @@ static int alloc_rng(struct kernel_rng *rng)
 	rng->rpi = malloc((sizeof(struct rand_pool_info) +
 			  (ENTROPYBYTES * OVERSAMPLINGFACTOR * sizeof(char))));
 	if (!rng->rpi) {
-		dolog(LOG_ERR, "Cannot allocate memory for random bytes");
+		dolog(JENT_LOG_ERR, "Cannot allocate memory for random bytes");
 		dealloc_rng(rng);
 		return -ENOMEM;
 	}
@@ -1008,7 +1008,7 @@ static int alloc_rng(struct kernel_rng *rng)
 	if (-1 == rng->fd) {
 		int errsv = errno;
 
-		dolog(LOG_ERR, "Open of %s failed: %s", rng->dev, strerror(errno));
+		dolog(JENT_LOG_ERR, "Open of %s failed: %s", rng->dev, strerror(errno));
 		dealloc_rng(rng);
 		return -errsv;
 	}
@@ -1023,7 +1023,7 @@ static int alloc(void)
 
 	ret = jent_entropy_init_ex(jent_osr, jent_flags);
 	if (ret) {
-		dolog(LOG_ERR, "The initialization of CPU Jitter RNG failed with error code %d\n", ret);
+		dolog(JENT_LOG_ERR, "The initialization of CPU Jitter RNG failed with error code %d\n", ret);
 		return ret;
 	}
 
@@ -1035,7 +1035,7 @@ static int alloc(void)
 	if (-1 == Entropy_avail_fd) {
 		int errsv = errno;
 
-		dolog(LOG_ERR, "Open of %s failed: %s", ENTROPYAVAIL, strerror(errno));
+		dolog(JENT_LOG_ERR, "Open of %s failed: %s", ENTROPYAVAIL, strerror(errno));
 		dealloc();
 		return -errsv;
 	}
@@ -1044,22 +1044,22 @@ static int alloc(void)
 	if (-1 == Entropy_thresh_fd) {
 		int errsv = errno;
 
-		dolog(LOG_ERR, "Open of %s failed: %s", ENTROPYTHRESH, strerror(errno));
+		dolog(JENT_LOG_ERR, "Open of %s failed: %s", ENTROPYTHRESH, strerror(errno));
 		dealloc();
 		return -errsv;
 	}
 
 	written = gather_entropy(&Random);
 	if (written >= 0) {
-		dolog(LOG_VERBOSE, "%zd bytes to /dev/random", written);
+		dolog(JENT_LOG_VERBOSE, "%zd bytes to /dev/random", written);
 	} else {
 		/*
 		 * We consider this as no error at this point - note that
-		 * dolog(LOG_ERR) terminates the daemon, which would defeat the
+		 * dolog(JENT_LOG_ERR) terminates the daemon, which would defeat the
 		 * re-initialization performed by gather_entropy_retry().
 		 * gather_entropy() already honors --exit-on-error itself.
 		 */
-		dolog(LOG_WARN, "Cannot write to /dev/random, failure: %zd",
+		dolog(JENT_LOG_WARN, "Cannot write to /dev/random, failure: %zd",
 		      written);
 	}
 
@@ -1082,7 +1082,7 @@ static void create_pid_file(const char *pid_file)
 	 */
 	fd = open(pid_file, O_RDWR|O_CREAT|O_NOFOLLOW, S_IRUSR|S_IWUSR);
 	if (fd == -1)
-		dolog(LOG_ERR, "Cannot open pid file %s: %s", pid_file,
+		dolog(JENT_LOG_ERR, "Cannot open pid file %s: %s", pid_file,
 		      strerror(errno));
 
 	if (lockf(fd, F_TLOCK, 0) == -1) {
@@ -1096,10 +1096,10 @@ static void create_pid_file(const char *pid_file)
 		close(fd);
 
 		if (errsv == EAGAIN || errsv == EACCES)
-			dolog(LOG_ERR,
+			dolog(JENT_LOG_ERR,
 			      "PID file already locked - another instance is running");
 		else
-			dolog(LOG_ERR, "Cannot lock pid file: %s",
+			dolog(JENT_LOG_ERR, "Cannot lock pid file: %s",
 			      strerror(errsv));
 	}
 
@@ -1107,13 +1107,13 @@ static void create_pid_file(const char *pid_file)
 	Pidfile_fd = fd;
 
 	if (ftruncate(Pidfile_fd, 0) == -1)
-		dolog(LOG_ERR, "Cannot truncate pid file: %s", strerror(errno));
+		dolog(JENT_LOG_ERR, "Cannot truncate pid file: %s", strerror(errno));
 
 	/* write our pid to the pid file */
 	snprintf(pid_str, sizeof(pid_str), "%d\n", getpid());
 	if (write(Pidfile_fd, pid_str, strlen(pid_str)) !=
 	    (ssize_t)strlen(pid_str))
-		dolog(LOG_ERR, "Cannot write to pid file");
+		dolog(JENT_LOG_ERR, "Cannot write to pid file");
 }
 
 static void daemonize(void)
@@ -1126,7 +1126,7 @@ static void daemonize(void)
 
 	pid = fork();
 	if (pid < 0)
-		dolog(LOG_ERR, "Cannot fork to daemonize\n");
+		dolog(JENT_LOG_ERR, "Cannot fork to daemonize\n");
 
 	/* the parent process exits -- nothing has been allocated, nothing
 	 * needs to be freed */
@@ -1137,12 +1137,12 @@ static void daemonize(void)
 
 	/* new SID for the child process */
 	if (setsid() < 0)
-		dolog(LOG_ERR, "Cannot obtain new SID for child\n");
+		dolog(JENT_LOG_ERR, "Cannot obtain new SID for child\n");
 
 	/* Change the current working directory.  This prevents the current
 	 * directory from being locked; hence not being able to remove it. */
 	if ((chdir("/")) < 0)
-		dolog(LOG_ERR, "Cannot change directory\n");
+		dolog(JENT_LOG_ERR, "Cannot change directory\n");
 	
 	if (Pidfile && strlen(Pidfile))
 		create_pid_file(Pidfile);
@@ -1164,7 +1164,7 @@ int main(int argc, char *argv[])
 	parse_opts(argc, argv);
 
 	if (geteuid())
-		dolog(LOG_ERR, "Program must start as root!");
+		dolog(JENT_LOG_ERR, "Program must start as root!");
 
 	ret = alloc();
 	if (ret)
