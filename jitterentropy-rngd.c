@@ -130,6 +130,8 @@ static unsigned int jent_osr = 1;
 
 #define ENTROPYBYTES 32
 #define OVERSAMPLINGFACTOR 2
+/* Size of the payload buffer trailing struct rand_pool_info */
+#define RNDADDENTROPY_BUFSIZE	(ENTROPYBYTES * OVERSAMPLINGFACTOR)
 /*
  * After (force reseed wakeups), the installed alarm handler will unconditionally
  * trigger a reseed irrespective of the seed level in two phases. This ensures
@@ -466,6 +468,16 @@ static ssize_t write_random(struct kernel_rng *rng, char *buf, size_t len,
 	if (len > SSIZE_MAX)
 		return -EOVERFLOW;
 
+	/*
+	 * rpi->buf is allocated with exactly RNDADDENTROPY_BUFSIZE bytes -
+	 * guard the memcpy below against a caller asking for more.
+	 */
+	if (len > RNDADDENTROPY_BUFSIZE) {
+		dolog(LOG_WARN, "Injection of %zu bytes requested, buffer holds only %u bytes",
+		      len, (unsigned int)RNDADDENTROPY_BUFSIZE);
+		return -EOVERFLOW;
+	}
+
 	 /* value is in bits */
 	rng->rpi->entropy_count = (entropy_bytes * 8);
 	rng->rpi->buf_size = len;
@@ -606,7 +618,7 @@ static ssize_t gather_entropy(struct kernel_rng *rng)
 	}
 
 out:
-	memset_secure(buf, 0, buflen);
+	memset_secure(buf, 0, sizeof(buf));
 
 	if (exit_on_error && ret < 0) {
 		/* We now exit as requested by caller */
