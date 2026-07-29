@@ -130,8 +130,18 @@ static unsigned int jent_osr = 1;
 
 #define ENTROPYBYTES 32
 #define OVERSAMPLINGFACTOR 2
-/* Size of the payload buffer trailing struct rand_pool_info */
+/*
+ * Amount of data handed to the kernel in one RNDADDENTROPY operation, and thus
+ * the size of the payload buffer trailing struct rand_pool_info.
+ *
+ * This is the single definition of that quantity: the buffer that is allocated,
+ * the block of entropy that is gathered and the bound that is enforced before
+ * copying into the buffer all have to agree, so they all derive from here.
+ */
 #define RNDADDENTROPY_BUFSIZE	(ENTROPYBYTES * OVERSAMPLINGFACTOR)
+/* Total allocation size of struct rand_pool_info including its payload */
+#define RNDADDENTROPY_ALLOCSIZE	(sizeof(struct rand_pool_info) + \
+				 RNDADDENTROPY_BUFSIZE)
 /*
  * After (force reseed wakeups), the installed alarm handler will unconditionally
  * trigger a reseed irrespective of the seed level in two phases. This ensures
@@ -538,7 +548,6 @@ static ssize_t read_jent(struct kernel_rng *rng, char *buf, size_t buflen)
 static ssize_t gather_entropy(struct kernel_rng *rng)
 {
 	sigset_t blocking_set, previous_set;
-#define ENTBLOCKSIZE	(ENTROPYBYTES * OVERSAMPLINGFACTOR)
 /*
  * Maximum numbers of blocks is determined by numbers of reseed IOCTLs: if
  * the reseed IOCTL is used, we call ceil(256 / 80) numbers of IOCTLs. As
@@ -548,8 +557,8 @@ static ssize_t gather_entropy(struct kernel_rng *rng)
  * rise and we encounter an endless loop.
  */
 #define ENTBLOCKS	(4 + 2 + 1)
-	char buf[(ENTBLOCKSIZE * ENTBLOCKS)];
-	ssize_t buflen = ENTBLOCKSIZE;
+	char buf[(RNDADDENTROPY_BUFSIZE * ENTBLOCKS)];
+	ssize_t buflen = RNDADDENTROPY_BUFSIZE;
 	ssize_t ret = 0;
 
 	sigemptyset(&previous_set);
@@ -946,9 +955,7 @@ static void dealloc_rng(struct kernel_rng *rng)
 		rng->ec = NULL;
 	}
 	if (NULL != rng->rpi) {
-		memset(rng->rpi, 0,(sizeof(struct rand_pool_info) +
-				    (ENTROPYBYTES * OVERSAMPLINGFACTOR *
-				     sizeof(char))));
+		memset(rng->rpi, 0, RNDADDENTROPY_ALLOCSIZE);
 		free(rng->rpi);
 		rng->rpi = NULL;
 	}
@@ -996,8 +1003,7 @@ static int alloc_rng(struct kernel_rng *rng)
 		return -EAGAIN;
 	}
 
-	rng->rpi = malloc((sizeof(struct rand_pool_info) +
-			  (ENTROPYBYTES * OVERSAMPLINGFACTOR * sizeof(char))));
+	rng->rpi = malloc(RNDADDENTROPY_ALLOCSIZE);
 	if (!rng->rpi) {
 		dolog(JENT_LOG_ERR, "Cannot allocate memory for random bytes");
 		dealloc_rng(rng);
