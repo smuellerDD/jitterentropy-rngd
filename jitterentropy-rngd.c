@@ -47,8 +47,11 @@
 #include <limits.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stddef.h>
 #include <sys/ioctl.h>
 #include <sys/select.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/utsname.h>
 #include <getopt.h>
 #include <sys/stat.h>
@@ -596,6 +599,91 @@ static inline void memset_secure(void *s, int c, size_t n)
 }
 
 /*******************************************************************
+ * service manager notification
+ *******************************************************************/
+
+/*
+ * Send a status notification to the service manager following the protocol
+ * documented in sd_notify(3): a single datagram written to the AF_UNIX socket
+ * named by the NOTIFY_SOCKET environment variable.
+ *
+ * The protocol is implemented directly rather than by linking against
+ * libsystemd. The daemon is started very early during boot, deliberately
+ * depends on almost nothing, and must keep building on systems without
+ * systemd - all of which a library dependency would work against.
+ *
+ * If NOTIFY_SOCKET is not set, no service manager is waiting for us and the
+ * call does nothing. Failures are logged but never fatal: not being able to
+ * talk to the service manager is no reason to stop delivering entropy.
+ */
+static void notify_service_manager(const char *state)
+{
+	const char *socket_path = getenv("NOTIFY_SOCKET");
+	struct sockaddr_un addr;
+	size_t path_len;
+	int fd;
+
+	if (!socket_path)
+		return;
+
+	path_len = strlen(socket_path);
+	if (0 == path_len || path_len > sizeof(addr.sun_path)) {
+		dolog(JENT_LOG_WARN,
+		      "NOTIFY_SOCKET holds an unusable path of %zu bytes",
+		      path_len);
+		return;
+	}
+
+	fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+	if (0 > fd) {
+		dolog(JENT_LOG_WARN, "Cannot create notification socket: %s",
+		      strerror(errno));
+		return;
+	}
+
+	memset(&addr, 0, sizeof(addr));
+	addr.sun_family = AF_UNIX;
+	memcpy(addr.sun_path, socket_path, path_len);
+
+	/*
+	 * A leading '@' denotes a socket in the abstract namespace, whose name
+	 * begins with a NULL byte instead. The length passed to sendto(2) must
+	 * then cover exactly the name, without a terminating NULL byte.
+	 */
+	if ('@' == addr.sun_path[0])
+		addr.sun_path[0] = '\0';
+
+	if (0 > sendto(fd, state, strlen(state), MSG_NOSIGNAL,
+		       (struct sockaddr *)&addr,
+		       (socklen_t)(offsetof(struct sockaddr_un, sun_path) +
+				   path_len))) {
+		dolog(JENT_LOG_WARN, "Cannot notify service manager: %s",
+		      strerror(errno));
+	} else {
+		dolog(JENT_LOG_DEBUG, "Notified service manager: %s", state);
+	}
+
+	close(fd);
+}
+
+/*
+ * Report readiness once. The daemon is only truly operational after it has
+ * seeded the kernel for the first time, so this is deliberately not called at
+ * startup - a service ordered after us can then rely on the kernel having been
+ * seeded by the time it runs.
+ */
+static void notify_ready(void)
+{
+	static int notified = 0;
+
+	if (notified)
+		return;
+
+	notified = 1;
+	notify_service_manager("READY=1");
+}
+
+/*******************************************************************
  * entropy handler functions
  *******************************************************************/
 
@@ -766,6 +854,16 @@ out:
 	}
 
 	sigprocmask(SIG_SETMASK, &previous_set, NULL);
+
+	/*
+	 * A full injection means the kernel has been seeded. Announcing
+	 * readiness from here rather than from the startup path covers every
+	 * caller: should the very first seeding attempt fail, the daemon stays
+	 * alive and retries, and the service manager is told about the success
+	 * whenever it eventually happens.
+	 */
+	if (ret > 0)
+		notify_ready();
 
 	return ret;
 }
