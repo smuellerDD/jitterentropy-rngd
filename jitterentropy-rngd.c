@@ -36,6 +36,14 @@
  * DAMAGE.
  */
 
+/*
+ * Feature test macros have to be defined before the first header is pulled in,
+ * otherwise they have no effect on the declarations exposed by libc.
+ */
+#ifndef _GNU_SOURCE
+# define _GNU_SOURCE
+#endif
+
 #include <unistd.h>
 #include <stdio.h>
 #include <stdarg.h>
@@ -46,11 +54,12 @@
 #include <string.h>
 #include <stdlib.h>
 #include <sys/ioctl.h>
+#include <sys/select.h>
 #include <sys/utsname.h>
-#define _GNU_SOURCE
 #include <getopt.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <time.h>
 #include <linux/random.h>
 #include <linux/version.h>
 #include <signal.h>
