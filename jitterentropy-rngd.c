@@ -1069,36 +1069,51 @@ static int alloc(void)
 static void create_pid_file(const char *pid_file)
 {
 	char pid_str[12];	/* max. integer length + '\n' + null */
+	int fd;
 
-	/* Ensure only one copy */
-	Pidfile_fd = open(pid_file, O_RDWR|O_CREAT|O_EXCL, S_IRUSR|S_IWUSR);
-	if (Pidfile_fd == -1)
-		dolog(LOG_ERR, "Cannot open pid file\n");
+	/*
+	 * Deliberately without O_EXCL: a PID file left behind by a daemon that
+	 * was killed must not stop a new instance from starting. The advisory
+	 * lock taken below - not the presence of the file - is what ensures
+	 * that only one copy runs.
+	 *
+	 * O_NOFOLLOW retains the protection that O_EXCL used to provide
+	 * against being redirected through a planted symlink.
+	 */
+	fd = open(pid_file, O_RDWR|O_CREAT|O_NOFOLLOW, S_IRUSR|S_IWUSR);
+	if (fd == -1)
+		dolog(LOG_ERR, "Cannot open pid file %s: %s", pid_file,
+		      strerror(errno));
 
-	if (lockf(Pidfile_fd, F_TLOCK, 0) == -1) {
-		if (errno == EAGAIN || errno == EACCES) {
-			int errsv = errno;
-
-			dolog(LOG_ERR, "PID file already locked\n");
-			exit(errsv);
-		} else
-			dolog(LOG_ERR, "Cannot lock pid file\n");
-	}
-
-	if (ftruncate(Pidfile_fd, 0) == -1) {
+	if (lockf(fd, F_TLOCK, 0) == -1) {
 		int errsv = errno;
 
-		dolog(LOG_ERR, "Cannot truncate pid file\n");
-		exit(errsv);
+		/*
+		 * The file belongs to somebody else, so drop it without
+		 * recording it in Pidfile_fd - otherwise dealloc() would
+		 * unlink the PID file of the instance that is still running.
+		 */
+		close(fd);
+
+		if (errsv == EAGAIN || errsv == EACCES)
+			dolog(LOG_ERR,
+			      "PID file already locked - another instance is running");
+		else
+			dolog(LOG_ERR, "Cannot lock pid file: %s",
+			      strerror(errsv));
 	}
+
+	/* From here on we own the PID file and dealloc() may remove it. */
+	Pidfile_fd = fd;
+
+	if (ftruncate(Pidfile_fd, 0) == -1)
+		dolog(LOG_ERR, "Cannot truncate pid file: %s", strerror(errno));
 
 	/* write our pid to the pid file */
 	snprintf(pid_str, sizeof(pid_str), "%d\n", getpid());
 	if (write(Pidfile_fd, pid_str, strlen(pid_str)) !=
-	    (ssize_t)strlen(pid_str)) {
-		dolog(LOG_ERR, "Cannot write to pid file\n");
-		exit(1);
-	}
+	    (ssize_t)strlen(pid_str))
+		dolog(LOG_ERR, "Cannot write to pid file");
 }
 
 static void daemonize(void)
