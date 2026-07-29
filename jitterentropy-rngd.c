@@ -36,13 +36,7 @@
  * DAMAGE.
  */
 
-/*
- * Feature test macros have to be defined before the first header is pulled in,
- * otherwise they have no effect on the declarations exposed by libc.
- */
-#ifndef _GNU_SOURCE
-# define _GNU_SOURCE
-#endif
+#define _GNU_SOURCE
 
 #include <unistd.h>
 #include <stdio.h>
@@ -60,6 +54,7 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <time.h>
+#include <syslog.h>
 #include <linux/random.h>
 #include <linux/version.h>
 #include <signal.h>
@@ -79,6 +74,14 @@
 static int Verbosity = 0;
 static int force_sp80090b = 0;
 static int status = 0;
+
+/*
+ * When set, log messages are handed to syslog(3) instead of being printed to
+ * stdout. This is what makes logging useful for a backgrounded daemon at all:
+ * daemonize() redirects stdout and stderr to /dev/null, so without syslog
+ * every message is discarded once the daemon detaches.
+ */
+static int use_syslog = 0;
 
 /*
  * When set, the daemon will exit on any error it encounters. The goal is that
@@ -281,6 +284,8 @@ static void usage(void)
 	fprintf(stderr, "\t   --version\tPrint version\n");
 	fprintf(stderr, "\t-v --verbose\tVerbose logging, multiple options increase verbosity\n");
 	fprintf(stderr, "\t\t\tVerbose logging implies running in foreground\n");
+	fprintf(stderr, "\t-l --syslog\tLog to syslog instead of stdout - required to see\n");
+	fprintf(stderr, "\t\t\tany log output when the daemon detaches\n");
 	fprintf(stderr, "\t-p --pid\tWrite daemon PID to file\n");
 	fprintf(stderr, "\t-s --sp800-90b\tForce SP800-90B compliance\n");
 	fprintf(stderr, "\t-f --flags\tInteger with flags used to allocate Jitter RNG\n");
@@ -330,9 +335,10 @@ static void parse_opts(int argc, char *argv[])
 			{"osr", 1, 0, 0},
 			{"status", 0, 0, 0},
 			{"exit-on-error", 0, 0, 0},
+			{"syslog", 0, 0, 0},
 			{0, 0, 0, 0}
 		};
-		c = getopt_long(argc, argv, "svp:hf:o:", opts, &opt_index);
+		c = getopt_long(argc, argv, "svp:hf:o:l", opts, &opt_index);
 		if (-1 == c)
 			break;
 		switch (c) {
@@ -387,6 +393,11 @@ static void parse_opts(int argc, char *argv[])
 				exit_on_error = 1;
 				break;
 
+			/* syslog */
+			case 9:
+				use_syslog = 1;
+				break;
+
 			default:
 				usage();
 			}
@@ -403,6 +414,9 @@ static void parse_opts(int argc, char *argv[])
 		case 's':
 			force_sp80090b = 1;
 			break;
+		case 'l':
+			use_syslog = 1;
+			break;
 		case 'f':
 			jent_flags = parse_uint(optarg);
 			break;
@@ -415,34 +429,142 @@ static void parse_opts(int argc, char *argv[])
 	}
 }
 
+/* ANSI SGR sequences used to colorize the log on a capable terminal */
+#define COL_RESET	"\033[0m"
+#define COL_DIM		"\033[2m"
+#define COL_CYAN	"\033[36m"
+#define COL_YELLOW	"\033[33m"
+#define COL_RED		"\033[1;31m"
+
+static int use_color = 0;
+
+/*
+ * Determine whether the log may carry ANSI escape sequences.
+ *
+ * Colors are only emitted when stdout is a terminal that is expected to
+ * interpret them. Writing escape sequences into a file or a pipe would corrupt
+ * the log for anything that later reads it, which is why this is detected
+ * rather than enabled unconditionally.
+ *
+ * This is re-evaluated after daemonize() redirects stdout to /dev/null.
+ */
+static void detect_color(void)
+{
+	const char *term = getenv("TERM");
+
+	use_color = 0;
+
+	/* Escape sequences are meaningless unless a terminal reads them */
+	if (!isatty(STDOUT_FILENO))
+		return;
+
+	/* Honour the NO_COLOR convention, see https://no-color.org/ */
+	if (getenv("NO_COLOR"))
+		return;
+
+	/* A terminal that announces itself as incapable is taken at its word */
+	if (!term || !strcmp(term, "dumb"))
+		return;
+
+	use_color = 1;
+}
+
+/*
+ * Render the current wall clock time into buf.
+ *
+ * CLOCK_REALTIME is deliberate: the log is read alongside other system logs,
+ * so the entries have to carry the actual time of day rather than an offset
+ * from some arbitrary start point. Note this means the printed times follow
+ * adjustments of the system clock, which is the right trade-off for a log but
+ * makes them unsuitable for measuring intervals.
+ *
+ * Only the messages printed to stdout are stamped here - syslog records its
+ * own timestamp, so adding one there would just duplicate it.
+ */
+static void logtime(char *buf, size_t buflen)
+{
+	struct timespec ts;
+	struct tm tm;
+	size_t len;
+
+	if (clock_gettime(CLOCK_REALTIME, &ts) || !localtime_r(&ts.tv_sec, &tm))
+		goto unknown;
+
+	len = strftime(buf, buflen, "%Y-%m-%d %H:%M:%S", &tm);
+	if (0 == len)
+		goto unknown;
+
+	/* Millisecond resolution keeps closely spaced events distinguishable */
+	snprintf(buf + len, buflen - len, ".%03ld", ts.tv_nsec / 1000000);
+
+	return;
+
+unknown:
+	snprintf(buf, buflen, "<no timestamp>");
+}
+
 static void dolog(int severity, const char *fmt, ...)
 {
 	va_list args;
 	char msg[1024];
-	char sev[10];
+	const char *sev, *col;
+	char now[32];
 
 	if (severity <= Verbosity) {
+		int prio;
+
 		va_start(args, fmt);
 		vsnprintf(msg, sizeof(msg), fmt, args);
 		va_end(args);
 
 		switch (severity) {
 		case JENT_LOG_DEBUG:
-			snprintf(sev, sizeof(sev), "Debug");
+			sev = "Debug";
+			col = COL_DIM;
+			prio = LOG_DEBUG;
 			break;
 		case JENT_LOG_VERBOSE:
-			snprintf(sev, sizeof(sev), "Verbose");
+			sev = "Verbose";
+			col = COL_CYAN;
+			prio = LOG_INFO;
 			break;
 		case JENT_LOG_WARN:
-			snprintf(sev, sizeof(sev), "Warning");
+			sev = "Warning";
+			col = COL_YELLOW;
+			prio = LOG_WARNING;
 			break;
 		case JENT_LOG_ERR:
-			snprintf(sev, sizeof(sev), "Error");
+			sev = "Error";
+			col = COL_RED;
+			prio = LOG_ERR;
 			break;
 		default:
-			snprintf(sev, sizeof(sev), "Unknown");
+			sev = "Unknown";
+			col = COL_RESET;
+			prio = LOG_NOTICE;
 		}
-		printf("jitterentropy-rngd - %s: %s\n", sev, msg);
+
+		if (use_syslog) {
+			/*
+			 * The identity and the priority already convey the
+			 * program name and the severity, so only the bare
+			 * message is handed over. The message is passed as an
+			 * argument rather than as the format string so that a
+			 * percent sign in it cannot be interpreted.
+			 */
+			syslog(prio, "%s", msg);
+		} else {
+			logtime(now, sizeof(now));
+
+			if (use_color) {
+				printf("[%s%s%s - jitterentropy-rngd - %s%s%s] %s\n",
+				       COL_DIM, now, COL_RESET,
+				       col, sev, COL_RESET, msg);
+			} else {
+				printf("[%s - jitterentropy-rngd - %s] %s\n",
+				       now, sev, msg);
+			}
+		}
 	}
 
 	if (JENT_LOG_ERR == severity) {
@@ -809,6 +931,10 @@ static void process_term(void)
 	signal(SIGALRM, SIG_IGN);
 
 	dealloc();
+
+	if (use_syslog)
+		closelog();
+
 	exit(0);
 }
 
@@ -1160,6 +1286,9 @@ static void daemonize(void)
 	freopen( "/dev/null", "w", stdout);
 	freopen( "/dev/null", "w", stderr);
 #pragma GCC diagnostic pop
+
+	/* stdout is no longer a terminal, so drop the colors */
+	detect_color();
 }
 
 
@@ -1167,7 +1296,18 @@ int main(int argc, char *argv[])
 {
 	int ret;
 
+	detect_color();
+
 	parse_opts(argc, argv);
+
+	/*
+	 * Establish the syslog connection before anything can log, and before
+	 * daemonize() redirects the standard streams. LOG_NDELAY opens the
+	 * socket right away rather than on the first message, so a failure to
+	 * reach the logger surfaces here instead of much later.
+	 */
+	if (use_syslog)
+		openlog("jitterentropy-rngd", LOG_PID | LOG_NDELAY, LOG_DAEMON);
 
 	if (geteuid())
 		dolog(JENT_LOG_ERR, "Program must start as root!");

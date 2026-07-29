@@ -78,6 +78,14 @@ implies that the
 .IR jitterentropy-rngd
 will not daemonize.
 .TP
+\fB\-l\fR, \fB\-\-syslog\fR
+send all log messages to syslog(3) using the
+.IR LOG_DAEMON
+facility instead of writing them to standard output. The
+verbosity selected with
+.BR \-\-verbose
+applies to the messages sent to syslog as well.
+.TP
 \fB\-p\fR, \fB\-\-pid\fR [\fI\,FILE\/\fR]
 triggers the creation of a PID file at the given location.
 .TP
