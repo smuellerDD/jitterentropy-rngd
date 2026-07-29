@@ -260,7 +260,7 @@ static void usage(void)
 	unsigned int ver = jent_version();
 	char version[30];
 
-	memset(version, 0, 30);
+	memset(version, 0, sizeof(version));
 	jentrng_versionstring(version, sizeof(version));
 
 	fprintf(stderr, "\njitterentropy rngd feeding entropy to input_pool of Linux RNG\n");
@@ -281,6 +281,26 @@ static void usage(void)
 	fprintf(stderr, "\nLRNG presence %sdetected\n",
 		lrng_present() ? "" : "not ");
 	exit(1);
+}
+
+/* Convert a command line argument into an unsigned int or bail out */
+static unsigned int parse_uint(const char *str)
+{
+	char *endptr = NULL;
+	unsigned long val;
+
+	errno = 0;
+	val = strtoul(str, &endptr, 10);
+
+	/* Reject empty strings, trailing garbage and out-of-range values */
+	if (errno || endptr == str || *endptr != '\0')
+		usage();
+#if ULONG_MAX > UINT_MAX
+	if (val > UINT_MAX)
+		usage();
+#endif
+
+	return (unsigned int)val;
 }
 
 static void parse_opts(int argc, char *argv[])
@@ -339,27 +359,13 @@ static void parse_opts(int argc, char *argv[])
 
 			/* flags */
 			case 5:
-			{
-				unsigned long val = strtoul(optarg, NULL, 10);
-
-				if (val > UINT_MAX)
-					usage();
-				jent_flags = (unsigned int)val;
-
+				jent_flags = parse_uint(optarg);
 				break;
-			}
 
 			/* osr */
 			case 6:
-			{
-				unsigned long val = strtoul(optarg, NULL, 10);
-
-				if (val > UINT_MAX)
-					usage();
-				jent_osr = (unsigned int)val;
-
+				jent_osr = parse_uint(optarg);
 				break;
-			}
 
 			/* status */
 			case 7:
@@ -388,25 +394,11 @@ static void parse_opts(int argc, char *argv[])
 			force_sp80090b = 1;
 			break;
 		case 'f':
-		{
-			unsigned long val = strtoul(optarg, NULL, 10);
-
-			if (val > UINT_MAX)
-				usage();
-			jent_flags = (unsigned int)val;
-
+			jent_flags = parse_uint(optarg);
 			break;
-		}
 		case 'o':
-		{
-			unsigned long val = strtoul(optarg, NULL, 10);
-
-			if (val > UINT_MAX)
-				usage();
-			jent_osr = (unsigned int)val;
-
+			jent_osr = parse_uint(optarg);
 			break;
-		}
 		default:
 			usage();
 		}
