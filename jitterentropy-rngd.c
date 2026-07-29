@@ -994,7 +994,7 @@ static ssize_t gather_entropy(struct kernel_rng *rng)
 		 * Write the entropy and trigger reseed - the Jitter RNG provides
 		 * full entropy so, we tell the Linux RNG the amount of entropy.
 		 */
-		ret = write_random(rng, buf, buflen, ret, 1);
+		ret = write_random(rng, buf, buflen, ret, rng_rework_present());
 	}
 
 	if (ret >= 0 && buflen != ret) {
