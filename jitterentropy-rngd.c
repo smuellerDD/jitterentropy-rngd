@@ -727,24 +727,28 @@ static ssize_t write_random(struct kernel_rng *rng, char *buf, size_t len,
 	rng->rpi->buf_size = 0;
 	memset(rng->rpi->buf, 0, len);
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,17,0)
 	/*
 	 * The LRNG does not require this IOCTL as the reseed is automatically
 	 * triggered.
 	 */
-	if (force_reseed && kernver_ge(4, 17, 0) && !lrng_present()) {
+	if (force_reseed && !lrng_present()) {
 		if (ioctl(rng->fd, RNDRESEEDCRNG) < 0) {
+			static int logged = 0;
+
 			written = -errno;
 			if (errno == EINVAL)
 				goto out;
-			dolog(JENT_LOG_WARN,
-			      "Error triggering a reseed of the kernel DRNG: %s",
-			      strerror(errno));
+
+			if (!logged) {
+				dolog(JENT_LOG_WARN,
+				      "Error triggering a reseed of the kernel DRNG: %s",
+				      strerror(errno));
+				logged = 1;
+			}
 		} else {
 			dolog(JENT_LOG_DEBUG, "Reseeding of kernel DRNG triggered");
 		}
 	}
-#endif
 
 out:
 	return written;
