@@ -145,10 +145,17 @@ static unsigned int jent_osr = 1;
 #define ENTROPYTHRESH "/proc/sys/kernel/random/write_wakeup_threshold"
 #define LRNG_FILE "/proc/lrng_type"
 
+#define LOG_DEBUG	3
+#define LOG_VERBOSE	2
+#define LOG_WARN	1
+#define LOG_ERR		0
+
 static void install_alarm(unsigned int secs);
 static void dealloc(void);
 static int alloc(void);
 static void dealloc_rng(struct kernel_rng *rng);
+static void dolog(int severity, const char *fmt, ...)
+	__attribute__((format(printf, 2, 3)));
 
 static unsigned long kern_maj = ULONG_MAX, kern_minor, kern_patchlevel;
 
@@ -391,10 +398,6 @@ static void parse_opts(int argc, char *argv[])
 	}
 }
 
-#define LOG_DEBUG	3
-#define LOG_VERBOSE	2
-#define LOG_WARN	1
-#define LOG_ERR		0
 static void dolog(int severity, const char *fmt, ...)
 {
 	va_list args;
@@ -462,7 +465,7 @@ static ssize_t write_random(struct kernel_rng *rng, char *buf, size_t len,
 		dolog(LOG_WARN, "Error injecting entropy: %s", strerror(errsv));
 		return -errsv;
 	} else {
-		dolog(LOG_DEBUG, "Injected %u bytes with an entropy count of %u bytes of entropy",
+		dolog(LOG_DEBUG, "Injected %zu bytes with an entropy count of %zu bytes of entropy",
 		      len, entropy_bytes);
 		written = len;
 	}
@@ -547,7 +550,7 @@ static ssize_t gather_entropy(struct kernel_rng *rng)
 		if (ret < 0)
 			goto out;
 
-		dolog(LOG_DEBUG, "LRNG: Inject %u bits of data with %u bits of entropy into Blake2S state",
+		dolog(LOG_DEBUG, "LRNG: Inject %zd bits of data with %zd bits of entropy into BLAKE2s state",
 		      buflen << 3, ret << 3);
 
 		/*
@@ -573,7 +576,7 @@ static ssize_t gather_entropy(struct kernel_rng *rng)
 		if (ret < 0)
 			goto out;
 
-		dolog(LOG_DEBUG, "Linux kernel >= 5.18: Inject %u bits of data with %u bits of entropy into Blake2S state",
+		dolog(LOG_DEBUG, "Linux kernel >= 5.18: Inject %zd bits of data with %zd bits of entropy into BLAKE2s state",
 		      buflen << 3, ret << 3);
 
 		/*
@@ -584,7 +587,7 @@ static ssize_t gather_entropy(struct kernel_rng *rng)
 	}
 
 	if (ret >= 0 && buflen != ret) {
-		dolog(LOG_WARN, "Injected %lu bytes into %s, expected %d",
+		dolog(LOG_WARN, "Injected %zd bytes into %s, expected %zd",
 		      ret, rng->dev, buflen);
 		ret = 0;
 	}
@@ -653,7 +656,7 @@ static void sig_entropy_avail(int sig)
 	if (--force_reseed == 0) {
 		force_reseed = FORCE_RESEED_WAKEUPS_PHASE2;
 		alarm_period = ALARM_PERIOD_PHASE2;
-		dolog(LOG_DEBUG, "Force reseed", entropy);
+		dolog(LOG_DEBUG, "Force reseed");
 		do {
 			if (written < 0) {
 				dolog(LOG_DEBUG, "Re-initializing rngd\n");
