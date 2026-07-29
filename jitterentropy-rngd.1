@@ -132,6 +132,11 @@ libbrary API of
 To make sure this output is helpful,
 all other parameters should be also set identically to the
 runtime invocation of the daemon.
+.TP
+\fB\-\-exit\-on\-error\fR
+causes the daemon to terminate on any error it encounters
+instead of attempting to recover, so that a supervising
+monitor can act on it.
 .PP
 .SH NOTES
 The
